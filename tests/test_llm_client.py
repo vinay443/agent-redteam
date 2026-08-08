@@ -34,13 +34,47 @@ def test_loopback_urls_accepted(url):
     [
         "http://evil.example.com:11434",
         "http://10.0.0.5:11434",
-        "http://host.docker.internal:11434",
+        "http://host.docker.internal:11434",  # not allowlisted -> still refused
         "ftp://localhost:11434",
     ],
 )
 def test_non_loopback_urls_rejected(url):
     with pytest.raises(LLMError):
         OllamaClient(base_url=url, model="qwen3:8b")
+
+
+# --- container endpoint (host.docker.internal) -------------------------------
+
+CONTAINER_ALLOW = ("api.anthropic.com", "host.docker.internal:11434")
+
+
+def test_container_endpoint_accepted_when_allowlisted():
+    client = OllamaClient(
+        base_url="http://host.docker.internal:11434",
+        model="qwen3:8b",
+        egress_allowlist=CONTAINER_ALLOW,
+    )
+    assert client.base_url == "http://host.docker.internal:11434"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://host.docker.internal:11435",  # allowlist is per-port
+        "http://evil.example.com:11434",  # allowlist is per-host
+    ],
+)
+def test_container_allowlist_does_not_widen(url):
+    with pytest.raises(LLMError):
+        OllamaClient(base_url=url, model="qwen3:8b", egress_allowlist=CONTAINER_ALLOW)
+
+
+def test_loopback_inside_container_is_a_loud_error(monkeypatch):
+    # Inside the container, loopback is the container. Fail with a
+    # misconfiguration message instead of a confusing connection error.
+    monkeypatch.setattr("common.llm_client._in_container", lambda: True)
+    with pytest.raises(LLMError, match="inside the container"):
+        OllamaClient(base_url="http://localhost:11434", model="qwen3:8b")
 
 
 # --- tool schema conversion --------------------------------------------------

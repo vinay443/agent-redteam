@@ -54,12 +54,12 @@ the active backend's model, so switching backends needs no other changes.
 > subjects and are not directly comparable.** Full detail in the module header of
 > [`common/llm_client.py`](common/llm_client.py).
 
-> ℹ️ The Ollama endpoint is restricted to **loopback** (`localhost`/`127.0.0.1`)
-> in code — a deliberate, stricter stand-in for the Anthropic path's egress
-> allowlist. Remote Ollama is not supported by this refactor. Running the
-> *containerised* executor against host Ollama also needs host networking that
-> this refactor does not wire up (see the note in the CLI section); the
-> in-process executor reaches `localhost:11434` directly.
+> ℹ️ The Ollama endpoint is restricted in code to **loopback**
+> (`localhost`/`127.0.0.1`, host-side) or the **host's own Ollama port reached
+> from inside the container** (`host.docker.internal:11434`, which must be in the
+> egress allowlist). A remote Ollama host is still refused. Both executors work
+> with this backend — see [SAFETY.md](SAFETY.md#the-one-exception-the-local-model-endpoint)
+> for exactly what the container is and is not allowed to reach.
 
 ---
 
@@ -185,9 +185,13 @@ python -m runner --category prompt_injection --n 5 --no-docker
 # All four categories, 5 each:
 python -m runner --category all --n 5
 
-# Require Docker (fail if unavailable) — the right flag for real measurement
-# on the Anthropic backend (see the container+Ollama note below):
+# Require Docker (fail if unavailable) — the right flag for real measurement,
+# on either backend:
 python -m runner --category permission_escalation --n 8 --docker
+
+# Containerised against the local Ollama backend: the container reaches the
+# host's daemon via host.docker.internal (see the note below).
+python -m runner --category prompt_injection --n 5 --docker
 ```
 
 ### 6. Report
@@ -222,13 +226,32 @@ passes. Otherwise it falls back to **in-process execution**, clearly tagged
 `sandboxed=False` — fine for development, not for real measurement. Use
 `--docker` to require the sandbox.
 
-> ℹ️ **Container + Ollama:** the containerised executor reaches the model from
-> *inside* the container, where `localhost` is the container, not the host. This
-> refactor does not wire up host networking or add `host.docker.internal` to the
-> loopback allowlist (that would touch `docker-compose.yml`, which is out of
-> scope), so `--docker` currently pairs cleanly with the **Anthropic** backend.
-> For the local Ollama backend, use the in-process executor (`--no-docker`),
-> which reaches `localhost:11434` directly.
+> ℹ️ **Container + Ollama:** `--docker` works with the local backend. Inside the
+> container `localhost` is the container, so the host's daemon is reached at
+> `host.docker.internal:11434`:
+>
+> - `docker/docker-compose.yml` maps the alias with
+>   `extra_hosts: ["host.docker.internal:host-gateway"]` (Docker Desktop provides
+>   it natively; `host-gateway` is the portable form that also works on Linux),
+>   and sets the container's `OLLAMA_BASE_URL` and `EGRESS_ALLOWLIST` accordingly;
+> - the allowlist entry is **exactly** that host on **exactly** that port — not a
+>   general relaxation. See [SAFETY.md](SAFETY.md#the-one-exception-the-local-model-endpoint).
+> - before the first attack the runner probes the endpoint *from inside the
+>   container* and logs an `ollama_preflight` event with the resolved gateway IP
+>   and the models the daemon listed. With `--docker` an unreachable endpoint
+>   aborts the run and names the cause; without it, the runner falls back
+>   in-process and logs that instead. It never quietly substitutes something else.
+>
+> Container-context settings use their own variable names
+> (`OLLAMA_CONTAINER_BASE_URL`, `CONTAINER_EGRESS_ALLOWLIST`) so your host `.env`
+> — which necessarily says `localhost:11434` — cannot leak in and point the
+> container at itself.
+>
+> **On Linux**, `host-gateway` resolves to the bridge gateway (e.g. `172.17.0.1`)
+> and reaches the host directly, so Ollama must be listening on an interface the
+> bridge can see: start it with `OLLAMA_HOST=0.0.0.0` if the preflight reports a
+> refused connection. On Docker Desktop (Windows/macOS) the gateway forwards to
+> the host's loopback, so the default loopback-only Ollama works unchanged.
 
 ### `python -m report`
 

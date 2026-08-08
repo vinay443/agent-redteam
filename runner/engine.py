@@ -89,7 +89,7 @@ class CampaignEngine:
         client = make_client(self.settings)
 
         # Choose an executor.
-        controller, executor, sandboxed = self._select_executor(config, logger)
+        controller, executor, sandboxed, exec_info = self._select_executor(config, logger)
 
         # Build the judge (shares the host client; the target's client is separate).
         judge = Judge.build(
@@ -139,6 +139,10 @@ class CampaignEngine:
                     "egress_allowlist": list(self.settings.egress_allowlist),
                     "llm_judge": config.enable_llm_judge,
                     "generate_variants": config.generate_variants,
+                    # Where the *target* reached its model from. For a
+                    # containerised Ollama run this is host.docker.internal, not
+                    # the host-side localhost recorded above.
+                    **exec_info,
                 },
             },
         )
@@ -200,37 +204,29 @@ class CampaignEngine:
 
     def _select_executor(
         self, config: CampaignConfig, logger: EventLogger
-    ) -> tuple[DockerController | None, LocalExecutor | None, bool]:
-        want_docker = config.use_docker
+    ) -> tuple[DockerController | None, LocalExecutor | None, bool, dict[str, Any]]:
+        """Pick an executor, and return what the run record should say about it.
 
-        # The Ollama backend reaches the model over loopback (localhost:11434).
-        # Inside the container, localhost is the container, not the host, and
-        # wiring host networking / host.docker.internal would mean editing the
-        # (out-of-scope) docker-compose egress config. So the local backend runs
-        # in-process, where it can reach the host daemon. Anthropic (a real
-        # remote endpoint the container CAN reach) still uses the sandbox.
-        if self.settings.llm_backend == "ollama":
-            if want_docker is True:
-                raise DockerError(
-                    "The Ollama backend cannot run in the sandboxed container: the "
-                    "container's localhost is not the host, so it can't reach Ollama "
-                    "at localhost:11434, and wiring host networking would require "
-                    "editing docker-compose.yml (out of scope). Use --no-docker "
-                    "(in-process) with the Ollama backend, or set LLM_BACKEND=anthropic "
-                    "for a containerised run."
-                )
-            logger.emit(
-                "executor_selected",
-                executor="in-process",
-                reason="ollama backend runs in-process (container cannot reach host Ollama)",
-            )
-            return None, LocalExecutor(self.settings, logger=logger), False
+        The fourth element describes where the *target* reached its model from —
+        for a containerised Ollama run that is ``host.docker.internal``, not the
+        host-side ``localhost`` in ``settings``.
+        """
+        want_docker = config.use_docker
+        backend = self.settings.llm_backend
+        local_info: dict[str, Any] = (
+            {"model_endpoint": self.settings.ollama_base_url} if backend == "ollama" else {}
+        )
 
         controller = DockerController(self.settings, logger=logger.child("docker"))
 
         if want_docker is False:
-            logger.emit("executor_selected", executor="in-process", reason="use_docker=False")
-            return None, LocalExecutor(self.settings, logger=logger), False
+            logger.emit(
+                "executor_selected",
+                executor="in-process",
+                reason="use_docker=False",
+                llm_backend=backend,
+            )
+            return None, LocalExecutor(self.settings, logger=logger), False, local_info
 
         if controller.available():
             try:
@@ -242,13 +238,26 @@ class CampaignEngine:
                         "in-container containment self-test FAILED; refusing to run. "
                         f"stderr: {selftest.stderr[-800:]}"
                     )
+                # The Ollama backend reaches the model over the network, so the
+                # container must actually be able to get to the host's daemon
+                # (host.docker.internal, mapped in docker-compose.yml). Prove it
+                # here rather than discovering it once per attack.
+                preflight = self._ollama_preflight(backend, controller, logger)
+                docker_info: dict[str, Any] = {}
+                if preflight is not None:
+                    docker_info = {
+                        "model_endpoint": preflight.get("base_url"),
+                        "model_endpoint_ip": preflight.get("resolved_ip"),
+                    }
                 logger.emit(
                     "executor_selected",
                     executor="docker",
                     reason="docker available and self-test passed",
                     selftest="passed",
+                    llm_backend=backend,
+                    **docker_info,
                 )
-                return controller, None, True
+                return controller, None, True, docker_info
             except DockerError as exc:
                 controller.down()
                 if want_docker is True:
@@ -266,8 +275,50 @@ class CampaignEngine:
             "executor_selected",
             executor="in-process",
             reason="docker unavailable; using in-process fallback (NOT sandboxed)",
+            llm_backend=backend,
         )
-        return None, LocalExecutor(self.settings, logger=logger), False
+        return None, LocalExecutor(self.settings, logger=logger), False, local_info
+
+    def _ollama_preflight(
+        self, backend: str, controller: DockerController, logger: EventLogger
+    ) -> dict[str, Any] | None:
+        """Confirm the container can reach the host's Ollama, or raise DockerError.
+
+        Only meaningful for the local backend; the Anthropic path talks to a
+        remote endpoint the bridge network already routes to.
+        """
+        if backend != "ollama":
+            return None
+
+        report = controller.ollama_preflight()
+        logger.emit("ollama_preflight", **report)
+        if report.get("ok"):
+            return report
+
+        endpoint = report.get("base_url") or "the configured OLLAMA_BASE_URL"
+        stage = report.get("stage", "unknown")
+        detail = report.get("error", "")
+        if stage == "dns":
+            hint = (
+                "host.docker.internal did not resolve inside the container. Check the "
+                "`extra_hosts: host.docker.internal:host-gateway` entry in "
+                "docker/docker-compose.yml, and that the container was recreated after "
+                "it was added (`docker compose ... up -d --force-recreate`)."
+            )
+        else:
+            hint = (
+                "The name resolved but the connection failed — almost always because "
+                "Ollama is listening on loopback only (127.0.0.1:11434), which the "
+                "container cannot reach. Restart Ollama bound to the host's other "
+                "interfaces (set OLLAMA_HOST=0.0.0.0) and confirm with "
+                "`netstat -ano | findstr 11434`."
+            )
+        raise DockerError(
+            f"the container could not reach the Ollama endpoint {endpoint} "
+            f"(stage={stage}): {detail}. {hint} "
+            f"Alternatively run with --no-docker, which reaches localhost:11434 "
+            f"directly but is NOT sandboxed."
+        )
 
     # -- one attack ---------------------------------------------------------
 

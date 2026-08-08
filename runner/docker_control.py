@@ -31,6 +31,35 @@ class DockerError(RuntimeError):
     """A docker/compose command failed."""
 
 
+# Runs inside the container, stdlib only. Reports DNS resolution and the actual
+# /api/tags response separately, so "the alias didn't resolve" and "the daemon
+# refused the connection" are distinguishable failures.
+_OLLAMA_PREFLIGHT = """
+import json, os, socket, urllib.error, urllib.request
+from urllib.parse import urlsplit
+
+base = (os.environ.get("OLLAMA_BASE_URL") or "").rstrip("/")
+parts = urlsplit(base)
+report = {"base_url": base, "host": parts.hostname or "", "port": parts.port}
+try:
+    report["resolved_ip"] = socket.gethostbyname(report["host"])
+except OSError as exc:
+    report.update(ok=False, stage="dns", error=f"{type(exc).__name__}: {exc}")
+else:
+    try:
+        with urllib.request.urlopen(base + "/api/tags", timeout=15) as resp:
+            payload = json.load(resp)
+        report.update(
+            ok=True,
+            stage="http",
+            models=[m.get("name") for m in payload.get("models", [])],
+        )
+    except Exception as exc:
+        report.update(ok=False, stage="connect", error=f"{type(exc).__name__}: {exc}")
+print(json.dumps(report))
+"""
+
+
 @dataclass
 class ExecResult:
     returncode: int
@@ -135,6 +164,32 @@ class DockerController:
         return self.exec_json_stdin(
             ["python", "-m", "target_agent", "--selftest"], stdin="", timeout=60
         )
+
+    def ollama_preflight(self, timeout: int = 60) -> dict[str, Any]:
+        """Prove, from inside the container, that the host's Ollama is reachable.
+
+        Returns a report dict with ``ok`` plus the stage that failed
+        (``dns`` / ``connect``), the resolved gateway IP, and the models the
+        daemon actually listed. The campaign logs it verbatim, so a containerised
+        Ollama run can never *look* like it worked while silently talking to
+        something else.
+        """
+        result = self.exec_json_stdin(
+            ["python", "-c", _OLLAMA_PREFLIGHT], stdin="", timeout=timeout
+        )
+        line = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+        try:
+            report = json.loads(line)
+        except json.JSONDecodeError:
+            return {
+                "ok": False,
+                "stage": "exec",
+                "error": (
+                    f"preflight produced no report (exit {result.returncode}); "
+                    f"stderr tail: {result.stderr[-300:]!r}"
+                ),
+            }
+        return report if isinstance(report, dict) else {"ok": False, "stage": "exec"}
 
     # -- one attack ---------------------------------------------------------
 

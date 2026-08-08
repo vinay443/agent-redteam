@@ -34,14 +34,39 @@ services:
     # Only the variables the agent needs are passed in. Notably NOT the
     # attacker or judge model names — the target must not know it is being
     # graded.
+    #
+    # Container-context overrides use *distinct* variable names
+    # (OLLAMA_CONTAINER_BASE_URL, CONTAINER_EGRESS_ALLOWLIST) so that the host's
+    # own .env — which necessarily says localhost:11434 — cannot leak in and
+    # point the container at itself.
     environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY is required}
+      LLM_BACKEND: ${LLM_BACKEND:-ollama}
+
+      # Anthropic backend. Not required: the default backend is keyless, and
+      # the runner already refuses to start an Anthropic campaign without a key
+      # (runner/__main__.py), which is a clearer error than a compose failure.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
-      TARGET_MODEL: ${TARGET_MODEL:-claude-opus-5}
+
+      # Ollama backend. Inside the container, loopback is the container — the
+      # host's daemon is reached through the host.docker.internal alias mapped
+      # by extra_hosts below.
+      OLLAMA_BASE_URL: ${OLLAMA_CONTAINER_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+      OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-300}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
+
+      TARGET_MODEL: ${TARGET_MODEL:-}
       TARGET_MAX_TURNS: ${TARGET_MAX_TURNS:-8}
       TARGET_MAX_TOKENS: ${TARGET_MAX_TOKENS:-8000}
       TARGET_EFFORT: ${TARGET_EFFORT:-medium}
-      EGRESS_ALLOWLIST: ${EGRESS_ALLOWLIST:-api.anthropic.com}
+
+      # Egress allowlist enforced in-process by target_agent/net.py. Two
+      # destinations, both explicit: the Anthropic API (https/443) and the host's
+      # Ollama port. The host:port form permits exactly that host on exactly that
+      # port — see the "local model endpoint" section of target_agent/net.py.
+      EGRESS_ALLOWLIST: ${CONTAINER_EGRESS_ALLOWLIST:-api.anthropic.com,host.docker.internal:11434}
+
       AGENT_SANDBOX_ROOT: /sandbox
       PYTHONPATH: /app
 
@@ -60,13 +85,23 @@ services:
     # NOT set: privileged (never), cap_add (never), devices (none).
 
     # -- Network -------------------------------------------------------------
-    # The agent needs to reach the Anthropic API. `bridge` gives outbound
-    # internet; the egress ALLOWLIST is enforced in-process (target_agent/net.py)
-    # because Compose cannot express a per-host allowlist. For a stricter
-    # posture, front this with a filtering proxy and set network_mode: none.
+    # The agent needs to reach a model: the Anthropic API (remote) or an Ollama
+    # daemon on the host (local backend). `bridge` gives outbound internet; the
+    # egress ALLOWLIST is enforced in-process (target_agent/net.py) because
+    # Compose cannot express a per-host allowlist. For a stricter posture, front
+    # this with a filtering proxy and set network_mode: none.
     # There is NO ports: mapping — nothing is exposed inbound.
     networks:
       - egress
+
+    # Reach the host machine by name. Docker Desktop (Windows/macOS) provides
+    # host.docker.internal itself; the `host-gateway` mapping is the portable
+    # form that also works on Linux, and is harmless where the alias already
+    # exists. This adds ONE /etc/hosts entry — it does not add a capability, a
+    # port mapping, or host networking, and nothing becomes reachable that the
+    # bridge network could not already route to.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
     restart: "no"
     init: true                   # PID 1 reaps zombies from exec'd processes

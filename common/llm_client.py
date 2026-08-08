@@ -5,8 +5,9 @@ implementations satisfy it:
 
 * :class:`AnthropicClient` — the original hosted path, unchanged in behaviour
   (adaptive thinking, effort, native structured outputs, native tool use).
-* :class:`OllamaClient` — a local backend hitting ``http://localhost:11434``
-  with ``qwen3:8b`` (the project default).
+* :class:`OllamaClient` — a local backend with ``qwen3:8b`` (the project
+  default), hitting ``http://localhost:11434`` on the host and
+  ``http://host.docker.internal:11434`` from inside the target container.
 
 :func:`make_client` reads :class:`~common.config.Settings` and returns the
 backend selected by ``LLM_BACKEND`` (``ollama`` by default, ``anthropic`` opt-in).
@@ -59,6 +60,7 @@ import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -375,26 +377,59 @@ def _anthropic_usage(response: Any) -> dict[str, int]:
 # Ollama backend — local, native tool calling
 # ---------------------------------------------------------------------------
 
-# The Ollama endpoint must be loopback-only. This is a deliberate, stricter
-# stand-in for the Anthropic path's egress allowlist (target_agent/net.py, which
-# is safety-critical and out of scope for this refactor): a local red-team lab
-# has no reason to send prompts/transcripts to a remote inference host, and
-# forbidding it removes an exfiltration surface. Point OLLAMA_BASE_URL at a
-# non-loopback host and this raises rather than silently phoning home.
+# Where the Ollama endpoint may point.
+#
+# Two execution contexts, two answers:
+#
+# * **on the host** (in-process executor) the daemon is on loopback and the
+#   traffic never leaves the machine — always permitted, no allowlist needed;
+# * **inside the container** loopback is the container itself, so the host is
+#   reached via ``host.docker.internal``. That is real egress, so it is gated by
+#   the same allowlist the Anthropic path uses (``target_agent/net.py``), which
+#   permits exactly ``host.docker.internal:11434`` and nothing else.
+#
+# A remote inference host is still refused: a red-team lab has no reason to ship
+# prompts and transcripts off-box, and forbidding it removes an exfiltration
+# surface. Point OLLAMA_BASE_URL at anything else and this raises rather than
+# silently phoning home.
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
-def _assert_loopback(base_url: str) -> None:
+def _in_container() -> bool:
+    """True when this process is running inside the target container."""
+    return Path("/.dockerenv").exists()
+
+
+def _assert_endpoint_allowed(base_url: str, allowlist: tuple[str, ...] | list[str]) -> None:
+    """Permit loopback (host-side), or an allowlisted local model endpoint (container)."""
     parts = urlsplit(base_url)
     if parts.scheme not in ("http", "https"):
         raise LLMError(f"OLLAMA_BASE_URL scheme {parts.scheme!r} is not http/https: {base_url!r}")
+
     host = (parts.hostname or "").lower()
-    if host not in _LOOPBACK_HOSTS:
+    if host in _LOOPBACK_HOSTS:
+        if _in_container():
+            # Loud, not silent: inside the container loopback resolves to the
+            # container itself, so this would fail with a connection error that
+            # looks like "Ollama isn't running" rather than a misconfiguration.
+            raise LLMError(
+                f"OLLAMA_BASE_URL is {base_url!r}, but this process is inside the "
+                f"container, where loopback is the container — not the host running "
+                f"Ollama. docker-compose.yml sets OLLAMA_BASE_URL to "
+                f"http://host.docker.internal:11434 for the container; override it "
+                f"with OLLAMA_CONTAINER_BASE_URL, not OLLAMA_BASE_URL."
+            )
+        return
+
+    from target_agent.net import EgressViolation, assert_url_allowed
+
+    try:
+        assert_url_allowed(base_url, allowlist)
+    except EgressViolation as exc:
         raise LLMError(
-            f"OLLAMA_BASE_URL host {host!r} is not loopback. The Ollama backend only "
-            f"permits localhost/127.0.0.1/::1 (see common/llm_client.py). Remote "
-            f"Ollama is not supported by this refactor."
-        )
+            f"OLLAMA_BASE_URL {base_url!r} is neither loopback nor permitted by the "
+            f"egress allowlist {tuple(allowlist)!r}: {exc}"
+        ) from exc
 
 
 class OllamaClient(LLMClient):
@@ -409,9 +444,10 @@ class OllamaClient(LLMClient):
         model: str,
         timeout: int = 300,
         num_ctx: int = 8192,
+        egress_allowlist: tuple[str, ...] | list[str] = (),
     ) -> None:
         super().__init__(model)
-        _assert_loopback(base_url)
+        _assert_endpoint_allowed(base_url, egress_allowlist)
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.num_ctx = num_ctx
@@ -632,6 +668,9 @@ def make_client(settings: Settings) -> LLMClient:
             model=settings.target_model,  # per-role model is passed on each call
             timeout=settings.ollama_timeout,
             num_ctx=settings.ollama_num_ctx,
+            # Only consulted for a non-loopback endpoint, i.e. the container
+            # reaching host.docker.internal. Host-side runs never hit it.
+            egress_allowlist=settings.egress_allowlist,
         )
     if backend == "anthropic":
         # Enforce the egress allowlist on the API base URL, unchanged from the
