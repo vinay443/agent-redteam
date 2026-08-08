@@ -1,0 +1,4 @@
+# Dependencies installed inside the target agent container.
+# Deliberately minimal: the smaller the image surface, the smaller the blast
+# radius. No shell helpers, no HTTP clients beyond what the SDK needs.
+anthropic>=0.69

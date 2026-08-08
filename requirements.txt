@@ -1,0 +1,9 @@
+# Runtime dependencies for the whole lab (host side).
+# The container image installs only requirements-target.txt.
+anthropic>=0.69
+PyYAML>=6.0
+python-dotenv>=1.0
+
+# Dev / test
+pytest>=8.0
+pytest-cov>=5.0

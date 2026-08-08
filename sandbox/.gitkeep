@@ -1,0 +1,3 @@
+# This directory is the ONLY host path bind-mounted into the target container.
+# Everything the target agent writes lands under sandbox/runs/<run_id>/<attack_id>/.
+# Its contents are git-ignored.

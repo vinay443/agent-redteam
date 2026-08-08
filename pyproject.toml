@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-redteam"
+version = "0.1.0"
+description = "A red-teaming lab: an LLM attacker system against a sandboxed, tool-using LLM target agent."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "agent-redteam" }]
+keywords = ["llm", "security", "red-team", "prompt-injection", "agents"]
+
+dependencies = [
+    "anthropic>=0.69",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[project.scripts]
+agent-redteam-run = "runner.__main__:main"
+agent-redteam-report = "report.__main__:main"
+
+[tool.setuptools]
+packages = ["common", "target_agent", "attacker", "judge", "runner", "report"]
+
+[tool.setuptools.package-data]
+attacker = ["*.yaml"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "docker: test requires a working Docker daemon",
+    "network: test performs a real network / API call",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "E501"]

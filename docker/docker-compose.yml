@@ -1,0 +1,77 @@
+# =============================================================================
+# Runtime containment for the target agent.
+#
+# This file — not the Dockerfile — is where the hard safety requirements live.
+# Every setting below is a deliberate constraint; read SAFETY.md for the "why"
+# and the command that verifies each one.
+# =============================================================================
+services:
+  target:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        AGENT_UID: ${AGENT_UID:-10001}
+        AGENT_GID: ${AGENT_GID:-10001}
+    image: agent-redteam-target:latest
+    container_name: ${CONTAINER_NAME:-agent-redteam-target}
+
+    # -- Mounts --------------------------------------------------------------
+    # The ONLY host path the container can see is ./sandbox. No source mount,
+    # no Docker socket, no config directory.
+    volumes:
+      - ../sandbox:/sandbox:rw
+
+    # -- Filesystem ----------------------------------------------------------
+    # Root filesystem is read-only; the agent can only write under /sandbox
+    # (the bind mount) and two small tmpfs scratch areas that vanish on stop.
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+      - /home/agent:size=16m,uid=${AGENT_UID:-10001},gid=${AGENT_GID:-10001}
+
+    # -- Credentials / models ------------------------------------------------
+    # Only the variables the agent needs are passed in. Notably NOT the
+    # attacker or judge model names — the target must not know it is being
+    # graded.
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY is required}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+      TARGET_MODEL: ${TARGET_MODEL:-claude-opus-5}
+      TARGET_MAX_TURNS: ${TARGET_MAX_TURNS:-8}
+      TARGET_MAX_TOKENS: ${TARGET_MAX_TOKENS:-8000}
+      TARGET_EFFORT: ${TARGET_EFFORT:-medium}
+      EGRESS_ALLOWLIST: ${EGRESS_ALLOWLIST:-api.anthropic.com}
+      AGENT_SANDBOX_ROOT: /sandbox
+      PYTHONPATH: /app
+
+    # -- Resource limits -----------------------------------------------------
+    # A runaway loop or fork bomb cannot starve the host.
+    mem_limit: 512m
+    memswap_limit: 512m          # no swap headroom beyond the memory cap
+    cpus: 1.0
+    pids_limit: 128              # process-count cap: fork bombs die here
+
+    # -- Privilege -----------------------------------------------------------
+    security_opt:
+      - no-new-privileges:true   # setuid binaries cannot escalate
+    cap_drop:
+      - ALL                      # drop every Linux capability
+    # NOT set: privileged (never), cap_add (never), devices (none).
+
+    # -- Network -------------------------------------------------------------
+    # The agent needs to reach the Anthropic API. `bridge` gives outbound
+    # internet; the egress ALLOWLIST is enforced in-process (target_agent/net.py)
+    # because Compose cannot express a per-host allowlist. For a stricter
+    # posture, front this with a filtering proxy and set network_mode: none.
+    # There is NO ports: mapping — nothing is exposed inbound.
+    networks:
+      - egress
+
+    restart: "no"
+    init: true                   # PID 1 reaps zombies from exec'd processes
+    stop_grace_period: 5s
+
+networks:
+  egress:
+    driver: bridge

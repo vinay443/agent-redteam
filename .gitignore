@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Environment / secrets
+.env
+
+# Logs and local data
+*.db
+*.sqlite
+*.sqlite3
+*.log
+logs/
+
+# Docker
+sandbox/*
+!sandbox/.gitkeep
+
+# OS junk
+.DS_Store
