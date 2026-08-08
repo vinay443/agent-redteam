@@ -12,9 +12,22 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__all__ = ["Settings", "load_settings", "repo_root", "DEFAULT_EGRESS_ALLOWLIST"]
+__all__ = [
+    "Settings",
+    "load_settings",
+    "repo_root",
+    "DEFAULT_EGRESS_ALLOWLIST",
+    "DEFAULT_BACKEND",
+    "SUPPORTED_BACKENDS",
+]
 
 DEFAULT_EGRESS_ALLOWLIST: tuple[str, ...] = ("api.anthropic.com",)
+
+# The lab defaults to a local Ollama backend; Anthropic is opt-in.
+SUPPORTED_BACKENDS: tuple[str, ...] = ("ollama", "anthropic")
+DEFAULT_BACKEND = "ollama"
+DEFAULT_OLLAMA_MODEL = "qwen3:8b"
+DEFAULT_ANTHROPIC_MODEL = "claude-opus-5"
 
 # Container-side path of the bind mount. Must match docker-compose.yml.
 CONTAINER_SANDBOX_ROOT = "/sandbox"
@@ -74,9 +87,18 @@ def _env_bool(name: str, default: bool) -> bool:
 class Settings:
     """Immutable snapshot of the lab's configuration."""
 
-    # --- credentials -------------------------------------------------------
+    # --- backend selection -------------------------------------------------
+    llm_backend: str  # "ollama" (default) | "anthropic"
+
+    # --- credentials (Anthropic backend) ----------------------------------
     api_key: str | None
     base_url: str
+
+    # --- local backend (Ollama) -------------------------------------------
+    ollama_base_url: str
+    ollama_model: str
+    ollama_timeout: int
+    ollama_num_ctx: int
 
     # --- models ------------------------------------------------------------
     target_model: str
@@ -129,6 +151,11 @@ class Settings:
             )
         return self.api_key
 
+    @property
+    def needs_api_key(self) -> bool:
+        """Only the Anthropic backend needs a key; Ollama is keyless."""
+        return self.llm_backend == "anthropic"
+
 
 def load_settings(*, load_dotenv: bool = True) -> Settings:
     """Build :class:`Settings` from the process environment."""
@@ -136,12 +163,30 @@ def load_settings(*, load_dotenv: bool = True) -> Settings:
         _load_dotenv_if_present()
 
     root = repo_root()
+
+    backend = _env("LLM_BACKEND", DEFAULT_BACKEND).strip().lower()
+    if backend not in SUPPORTED_BACKENDS:
+        raise ValueError(
+            f"LLM_BACKEND={backend!r} is not supported; expected one of {SUPPORTED_BACKENDS}."
+        )
+    ollama_model = _env("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+
+    # Per-role models default to the active backend's model, so switching
+    # backends "just works" without also re-pointing TARGET/ATTACKER/JUDGE_MODEL.
+    # An explicit TARGET_MODEL etc. still wins.
+    role_default = ollama_model if backend == "ollama" else DEFAULT_ANTHROPIC_MODEL
+
     return Settings(
+        llm_backend=backend,
         api_key=os.environ.get("ANTHROPIC_API_KEY") or None,
         base_url=_env("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
-        target_model=_env("TARGET_MODEL", "claude-opus-5"),
-        attacker_model=_env("ATTACKER_MODEL", "claude-opus-5"),
-        judge_model=_env("JUDGE_MODEL", "claude-opus-5"),
+        ollama_base_url=_env("OLLAMA_BASE_URL", "http://localhost:11434"),
+        ollama_model=ollama_model,
+        ollama_timeout=_env_int("OLLAMA_TIMEOUT", 300),
+        ollama_num_ctx=_env_int("OLLAMA_NUM_CTX", 8192),
+        target_model=_env("TARGET_MODEL", role_default),
+        attacker_model=_env("ATTACKER_MODEL", role_default),
+        judge_model=_env("JUDGE_MODEL", role_default),
         target_max_turns=_env_int("TARGET_MAX_TURNS", 8),
         target_max_tokens=_env_int("TARGET_MAX_TOKENS", 8000),
         target_effort=_env("TARGET_EFFORT", "medium"),

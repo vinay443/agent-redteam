@@ -1,19 +1,25 @@
-"""The agent under test: a plain function-calling loop over the Messages API.
+"""The agent under test: a plain function-calling loop over an LLM backend.
 
-No framework. The loop is ~80 lines and is meant to be read end to end, because
-"what exactly did the agent do" is the primary artefact the lab produces.
+No framework. The loop is short and meant to be read end to end, because "what
+exactly did the agent do" is the primary artefact the lab produces.
+
+The loop talks to an :class:`~common.llm_client.LLMClient`, not to a specific
+provider — so the same agent runs against Anthropic or a local Ollama model with
+no change here. The client owns the wire dialect; this loop stays neutral.
 
 Loop shape (standard manual tool-use loop):
 
-    user turn → model → if tool_use: run tools, append ONE user message
-    containing every tool_result → model → … → end_turn
+    user turn → model → if tool calls: run tools, feed results back → model → …
 
-Two details that matter and are easy to get wrong:
+Two details the client abstraction preserves for the Anthropic path:
 
-* the assistant turn is appended **whole** (``response.content``), so thinking
-  blocks round-trip unmodified as the API requires;
-* every ``tool_use`` block gets exactly one ``tool_result``, in a single user
-  message — splitting them trains the model out of parallel tool use.
+* the assistant turn is echoed **whole** (via ``build_assistant_echo``), so
+  thinking blocks round-trip unmodified as the API requires;
+* every tool call gets exactly one result, fed back together in one step.
+
+The transcript stored on :class:`AgentRun` is a *normalised*, provider-neutral
+view (``text`` / ``thinking`` / ``tool_use`` / ``tool_result`` blocks) so the
+judge and signal extractor work identically regardless of backend.
 """
 
 from __future__ import annotations
@@ -21,8 +27,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-import anthropic
-
+from common.llm_client import LLMClient, LLMError, ToolCall, ToolResult
 from common.logging import EventLogger, NullLogger
 from common.timeutil import monotonic_ms, utcnow_iso
 from target_agent.guard import Guard, GuardDecision, NullGuard
@@ -67,6 +72,7 @@ class AgentRun:
     system_prompt_sha256: str
     canary: str
     started_at: str
+    provider: str = ""
     finished_at: str | None = None
     duration_ms: float = 0.0
     turns: int = 0
@@ -113,26 +119,13 @@ class AgentRun:
         return "\n".join(chunks)
 
 
-def _jsonable_block(block: Any) -> dict[str, Any]:
-    """Convert an SDK content block into a plain dict for the transcript."""
-    if isinstance(block, dict):
-        return block
-    dump = getattr(block, "model_dump", None)
-    if callable(dump):
-        try:
-            return dump(mode="json", exclude_none=True)
-        except Exception:  # noqa: BLE001, S110 - fall back to a repr below
-            pass
-    return {"type": getattr(block, "type", "unknown"), "repr": repr(block)}
-
-
 class TargetAgent:
     """The agent under test."""
 
     def __init__(
         self,
         *,
-        client: anthropic.Anthropic,
+        client: LLMClient,
         toolbox: Toolbox,
         model: str,
         sandbox_root: str,
@@ -168,6 +161,7 @@ class TargetAgent:
             attack_id=attack_id,
             category=category,
             model=self.model,
+            provider=getattr(self.client, "provider", ""),
             sandbox_root=self.sandbox_root,
             system_prompt_sha256=prompt_fingerprint(self.system_prompt),
             canary=self.canary,
@@ -181,13 +175,14 @@ class TargetAgent:
             self.logger.emit("agent_run_blocked", attack_id=attack_id, reason=decision.reason)
             return result
 
-        messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
+        messages: list[dict[str, Any]] = self.client.build_user(user_message)
         result.transcript.append({"role": "user", "content": user_message})
 
         self.logger.emit(
             "agent_run_start",
             attack_id=attack_id,
             category=category,
+            provider=result.provider,
             model=self.model,
             sandbox_root=self.sandbox_root,
             max_turns=self.max_turns,
@@ -198,8 +193,15 @@ class TargetAgent:
         try:
             for turn in range(1, self.max_turns + 1):
                 result.turns = turn
-                response = self._call_model(messages)
-                self._accumulate_usage(result, response)
+                response = self.client.complete(
+                    messages,
+                    system=self.system_prompt,
+                    tools=self.tools,
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    effort=self.effort,
+                )
+                self._accumulate_usage(result, response.usage)
                 result.stop_reason = response.stop_reason
 
                 self.logger.emit(
@@ -207,29 +209,24 @@ class TargetAgent:
                     attack_id=attack_id,
                     turn=turn,
                     stop_reason=response.stop_reason,
-                    block_types=[getattr(b, "type", "?") for b in response.content],
+                    block_types=[b.get("type", "?") for b in response.display_blocks],
                 )
 
-                # Opus-tier models can decline a request outright: HTTP 200 with
-                # stop_reason "refusal" and an empty/partial content list. Check
-                # before touching content.
+                # Anthropic can decline outright (stop_reason "refusal"); Ollama
+                # never sets this. Check before touching content.
                 if response.stop_reason == "refusal":
-                    details = getattr(response, "stop_details", None)
-                    result.refusal = {
-                        "category": getattr(details, "category", None),
-                        "explanation": getattr(details, "explanation", None),
+                    result.refusal = response.refusal or {
+                        "category": None,
+                        "explanation": None,
                     }
                     self.logger.emit("model_refusal", attack_id=attack_id, **result.refusal)
                     break
 
-                assistant_blocks = [_jsonable_block(b) for b in response.content]
-                messages.append({"role": "assistant", "content": response.content})
-                result.transcript.append({"role": "assistant", "content": assistant_blocks})
+                result.transcript.append({"role": "assistant", "content": response.display_blocks})
+                messages.extend(self.client.build_assistant_echo(response))
 
-                tool_uses = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
-
-                if not tool_uses:
-                    result.final_text = _text_of(assistant_blocks)
+                if not response.tool_calls:
+                    result.final_text = response.text
                     output_decision = self.guard.on_model_output(result.final_text)
                     if not output_decision.allow:
                         result.final_text = output_decision.replacement or "[blocked by guard]"
@@ -240,16 +237,26 @@ class TargetAgent:
                         )
                     break
 
-                tool_results: list[dict[str, Any]] = []
-                for block in tool_uses:
+                tool_results: list[ToolResult] = []
+                transcript_blocks: list[dict[str, Any]] = []
+                for call in response.tool_calls:
                     tool_seq += 1
-                    record, result_block = self._run_tool(block, tool_seq)
+                    record, tool_result = self._run_tool(call, tool_seq)
                     result.tool_calls.append(record)
-                    tool_results.append(result_block)
+                    tool_results.append(tool_result)
+                    transcript_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_result.tool_use_id,
+                            "content": tool_result.content,
+                            "is_error": tool_result.is_error,
+                        }
+                    )
 
-                # Every tool_result for this turn goes back in ONE user message.
-                messages.append({"role": "user", "content": tool_results})
-                result.transcript.append({"role": "user", "content": tool_results})
+                # All tool results for this turn are fed back together; the
+                # client decides the wire shape (one message or several).
+                messages.extend(self.client.build_tool_results(tool_results))
+                result.transcript.append({"role": "user", "content": transcript_blocks})
 
                 if response.stop_reason == "max_tokens":
                     result.error = "max_tokens_reached"
@@ -257,7 +264,7 @@ class TargetAgent:
             else:
                 result.error = "max_turns_reached"
 
-        except anthropic.APIError as exc:
+        except LLMError as exc:
             result.error = f"{type(exc).__name__}: {exc}"
             self.logger.emit("agent_run_error", attack_id=attack_id, error=result.error)
         except Exception as exc:  # noqa: BLE001 - one attack must not kill a campaign
@@ -284,20 +291,9 @@ class TargetAgent:
 
     # -- internals ----------------------------------------------------------
 
-    def _call_model(self, messages: list[dict[str, Any]]) -> Any:
-        return self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=self.system_prompt,
-            tools=self.tools,
-            messages=messages,
-            thinking={"type": "adaptive"},
-            output_config={"effort": self.effort},
-        )
-
-    def _run_tool(self, block: Any, seq: int) -> tuple[ToolCallRecord, dict[str, Any]]:
-        name = block.name
-        arguments = dict(block.input or {})
+    def _run_tool(self, call: ToolCall, seq: int) -> tuple[ToolCallRecord, ToolResult]:
+        name = call.name
+        arguments = dict(call.arguments or {})
         outcome = self.toolbox.execute(name, arguments)
 
         content = outcome.content
@@ -311,7 +307,7 @@ class TargetAgent:
         record = ToolCallRecord(
             seq=seq,
             ts=utcnow_iso(),
-            tool_use_id=block.id,
+            tool_use_id=call.id,
             name=name,
             arguments=arguments,
             ok=outcome.ok,
@@ -324,28 +320,19 @@ class TargetAgent:
             violation=outcome.violation,
             result_preview=content[:2000],
         )
-        result_block = {
-            "type": "tool_result",
-            "tool_use_id": block.id,
-            "content": content,
-            "is_error": not outcome.ok,
-        }
-        return record, result_block
+        tool_result = ToolResult(
+            tool_use_id=call.id,
+            name=name,
+            content=content,
+            is_error=not outcome.ok,
+        )
+        return record, tool_result
 
     @staticmethod
-    def _accumulate_usage(result: AgentRun, response: Any) -> None:
-        usage = getattr(response, "usage", None)
-        if usage is None:
-            return
-        for field_name in (
-            "input_tokens",
-            "output_tokens",
-            "cache_creation_input_tokens",
-            "cache_read_input_tokens",
-        ):
-            value = getattr(usage, field_name, None)
+    def _accumulate_usage(result: AgentRun, usage: dict[str, int]) -> None:
+        for key, value in (usage or {}).items():
             if isinstance(value, int):
-                result.usage[field_name] = result.usage.get(field_name, 0) + value
+                result.usage[key] = result.usage.get(key, 0) + value
 
 
 def _text_of(blocks: list[dict[str, Any]]) -> str:

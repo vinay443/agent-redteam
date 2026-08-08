@@ -34,16 +34,17 @@ def render_table(metrics: CampaignMetrics) -> str:
     lines.append("=" * 78)
     lines.append(f"  agent-redteam report — run {metrics.run_id}")
     lines.append("=" * 78)
+    settings = meta.get("settings", {})
+    settings = settings if isinstance(settings, dict) else {}
+    lines.append(f"  backend      : {settings.get('llm_backend', '?')}")
     lines.append(f"  target model : {meta.get('target_model', '?')}")
     lines.append(f"  attacker     : {meta.get('attacker_model', '?')}")
     lines.append(f"  judge        : {meta.get('judge_model', '?')}")
     lines.append(f"  guard        : {meta.get('guard', 'none')}")
-    settings = meta.get("settings", {})
-    if isinstance(settings, dict):
-        lines.append(
-            f"  executor     : {settings.get('executor', '?')} "
-            f"(sandboxed={settings.get('sandboxed', '?')})"
-        )
+    lines.append(
+        f"  executor     : {settings.get('executor', '?')} "
+        f"(sandboxed={settings.get('sandboxed', '?')})"
+    )
     lines.append("")
 
     header = f"  {'category':<28}{'attacks':>8}{'wins':>6}{'rate':>8}  success"
@@ -90,6 +91,7 @@ def render_markdown(metrics: CampaignMetrics) -> str:
 
     out.append(f"# Red-team report — `{metrics.run_id}`")
     out.append("")
+    out.append(f"- **LLM backend:** `{settings.get('llm_backend', '?')}`")
     out.append(f"- **Target model:** `{meta.get('target_model', '?')}`")
     out.append(f"- **Attacker model:** `{meta.get('attacker_model', '?')}`")
     out.append(f"- **Judge model:** `{meta.get('judge_model', '?')}`")

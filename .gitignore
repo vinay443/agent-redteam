@@ -23,3 +23,4 @@ sandbox/*
 
 # OS junk
 .DS_Store
+results/

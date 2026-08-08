@@ -15,10 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
-import anthropic
-
 from attacker.models import Attack
-from common.llm import LLMError
+from common.llm_client import LLMClient, LLMError
 from common.logging import EventLogger, NullLogger
 from judge.code_checks import check_success
 from judge.llm_judge import LLMJudge
@@ -45,7 +43,7 @@ class Judge:
     def build(
         cls,
         *,
-        client: anthropic.Anthropic | None,
+        client: LLMClient | None,
         model: str,
         enable_llm: bool = True,
         logger: EventLogger | None = None,

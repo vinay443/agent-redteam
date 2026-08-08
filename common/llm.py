@@ -1,58 +1,50 @@
-"""Thin helpers over the Anthropic SDK.
+"""Backward-compatible facade over :mod:`common.llm_client`.
 
-Two things live here:
+The LLM layer was refactored to support pluggable backends (Anthropic, Ollama).
+The real implementation now lives in :mod:`common.llm_client`; this module keeps
+the historical import surface working:
 
-* :func:`make_client` — a client whose ``base_url`` has been checked against the
-  egress allowlist before construction.
-* :func:`complete_json` — one-shot structured-output call used by the attacker's
-  variant generator and by the LLM judge. It handles the ``refusal`` stop reason
-  explicitly rather than indexing blindly into ``response.content``.
+* ``make_client(settings)`` — now returns an :class:`~common.llm_client.LLMClient`
+  chosen by ``settings.llm_backend`` instead of a raw Anthropic client.
+* ``complete_json(client, *, ...)`` — a free-function shim that delegates to
+  ``client.complete_json(...)``. New code should call the method on the client
+  directly.
+
+Prefer importing from :mod:`common.llm_client` in new code.
 """
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
-import anthropic
+from common.llm_client import (
+    AnthropicClient,
+    LLMClient,
+    LLMError,
+    LLMRefusal,
+    LLMResponse,
+    OllamaClient,
+    ToolCall,
+    ToolResult,
+    make_client,
+)
 
-from common.config import Settings
-from target_agent.net import assert_url_allowed
-
-__all__ = ["make_client", "complete_json", "LLMError", "LLMRefusal"]
-
-
-class LLMError(RuntimeError):
-    """A model call failed in a way the caller should surface, not retry blindly."""
-
-
-class LLMRefusal(LLMError):
-    """The model declined the request (``stop_reason == "refusal"``)."""
-
-    def __init__(self, category: str | None, explanation: str | None) -> None:
-        self.category = category
-        self.explanation = explanation
-        super().__init__(f"model refused (category={category}): {explanation}")
-
-
-def make_client(settings: Settings) -> anthropic.Anthropic:
-    """Construct an Anthropic client, enforcing the egress allowlist on ``base_url``."""
-    assert_url_allowed(settings.base_url, settings.egress_allowlist)
-    return anthropic.Anthropic(
-        api_key=settings.require_api_key(),
-        base_url=settings.base_url,
-    )
-
-
-def _first_text(response: Any) -> str:
-    for block in response.content:
-        if getattr(block, "type", None) == "text":
-            return block.text
-    return ""
+__all__ = [
+    "make_client",
+    "complete_json",
+    "LLMError",
+    "LLMRefusal",
+    "LLMClient",
+    "LLMResponse",
+    "AnthropicClient",
+    "OllamaClient",
+    "ToolCall",
+    "ToolResult",
+]
 
 
 def complete_json(
-    client: anthropic.Anthropic,
+    client: LLMClient,
     *,
     model: str,
     system: str,
@@ -61,40 +53,15 @@ def complete_json(
     max_tokens: int = 4000,
     effort: str = "medium",
 ) -> dict[str, Any]:
-    """Call the model and return a dict validated by the API against ``schema``.
+    """Deprecated free-function form of :meth:`LLMClient.complete_json`.
 
-    Uses structured outputs (``output_config.format``), so the first text block
-    is guaranteed to be JSON matching the schema — no regex extraction, no
-    retry-on-parse loop.
+    Kept so older call sites keep working; delegates to the client's method.
     """
-    try:
-        response = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            output_config={
-                "effort": effort,
-                "format": {"type": "json_schema", "schema": schema},
-            },
-        )
-    except anthropic.APIError as exc:
-        raise LLMError(f"{type(exc).__name__}: {exc}") from exc
-
-    if response.stop_reason == "refusal":
-        details = getattr(response, "stop_details", None)
-        raise LLMRefusal(
-            getattr(details, "category", None),
-            getattr(details, "explanation", None),
-        )
-
-    text = _first_text(response)
-    if not text:
-        raise LLMError(f"no text block in response (stop_reason={response.stop_reason})")
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:  # pragma: no cover - schema makes this unreachable
-        raise LLMError(f"structured output was not valid JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise LLMError("structured output was not a JSON object")
-    return payload
+    return client.complete_json(
+        system=system,
+        user=user,
+        schema=schema,
+        model=model,
+        max_tokens=max_tokens,
+        effort=effort,
+    )

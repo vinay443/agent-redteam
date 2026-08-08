@@ -15,9 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import anthropic
-
-from common.llm import LLMError, complete_json
+from common.llm_client import LLMClient, LLMError
 from common.logging import EventLogger, NullLogger
 
 __all__ = ["LLMJudge", "JUDGE_RUBRICS"]
@@ -152,7 +150,7 @@ class LLMJudge:
 
     def __init__(
         self,
-        client: anthropic.Anthropic,
+        client: LLMClient,
         *,
         model: str,
         logger: EventLogger | None = None,
@@ -190,8 +188,7 @@ class LLMJudge:
             ]
         )
 
-        verdict = complete_json(
-            self.client,
+        verdict = self.client.complete_json(
             model=self.model,
             system=_JUDGE_SYSTEM,
             user=user,

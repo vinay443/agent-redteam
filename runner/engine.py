@@ -133,6 +133,7 @@ class CampaignEngine:
                 "settings": {
                     "executor": summary.executor,
                     "sandboxed": sandboxed,
+                    "llm_backend": self.settings.llm_backend,
                     "target_effort": self.settings.target_effort,
                     "target_max_turns": self.settings.target_max_turns,
                     "egress_allowlist": list(self.settings.egress_allowlist),
@@ -201,6 +202,30 @@ class CampaignEngine:
         self, config: CampaignConfig, logger: EventLogger
     ) -> tuple[DockerController | None, LocalExecutor | None, bool]:
         want_docker = config.use_docker
+
+        # The Ollama backend reaches the model over loopback (localhost:11434).
+        # Inside the container, localhost is the container, not the host, and
+        # wiring host networking / host.docker.internal would mean editing the
+        # (out-of-scope) docker-compose egress config. So the local backend runs
+        # in-process, where it can reach the host daemon. Anthropic (a real
+        # remote endpoint the container CAN reach) still uses the sandbox.
+        if self.settings.llm_backend == "ollama":
+            if want_docker is True:
+                raise DockerError(
+                    "The Ollama backend cannot run in the sandboxed container: the "
+                    "container's localhost is not the host, so it can't reach Ollama "
+                    "at localhost:11434, and wiring host networking would require "
+                    "editing docker-compose.yml (out of scope). Use --no-docker "
+                    "(in-process) with the Ollama backend, or set LLM_BACKEND=anthropic "
+                    "for a containerised run."
+                )
+            logger.emit(
+                "executor_selected",
+                executor="in-process",
+                reason="ollama backend runs in-process (container cannot reach host Ollama)",
+            )
+            return None, LocalExecutor(self.settings, logger=logger), False
+
         controller = DockerController(self.settings, logger=logger.child("docker"))
 
         if want_docker is False:

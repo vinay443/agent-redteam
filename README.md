@@ -20,6 +20,49 @@ independently verifiable](SAFETY.md).
 
 ---
 
+## LLM backends
+
+The lab talks to models through a single provider-neutral interface
+([`common/llm_client.py`](common/llm_client.py)), so the whole harness — target
+agent, attacker generator, and LLM judge — runs against either backend with one
+config switch (`LLM_BACKEND`):
+
+| Backend | Default? | Model | Needs a key? | Notes |
+| --- | --- | --- | --- | --- |
+| **Ollama** (local) | ✅ yes | `qwen3:8b` | No | Runs on your machine at `http://localhost:11434`. |
+| **Anthropic** (hosted) | opt-in | `claude-opus-5` | Yes (`ANTHROPIC_API_KEY`) | The original path, unchanged. |
+
+Switch backends by editing one line in `.env`:
+
+```bash
+LLM_BACKEND=ollama       # default — local, no key
+# LLM_BACKEND=anthropic  # hosted — requires ANTHROPIC_API_KEY
+```
+
+Per-role models (`TARGET_MODEL` / `ATTACKER_MODEL` / `JUDGE_MODEL`) default to
+the active backend's model, so switching backends needs no other changes.
+
+> ⚠️ **Tool-use reliability on the local backend.** `qwen3:8b` supports
+> **native** function/tool calling via Ollama's `/api/chat` (verified before
+> shipping), so the target agent makes real structured tool calls — no
+> prompt-scraping fallback. But an 8B local model is **materially less reliable**
+> than a hosted frontier model: it follows tool schemas and multi-step
+> instructions less consistently, is slower (it's a reasoning model with a
+> separate `thinking` stream), and has **no `refusal` stop reason** (Ollama
+> refusals arrive as ordinary text, so refusal-based signals never fire).
+> **Success-rate and defence numbers from the two backends measure different
+> subjects and are not directly comparable.** Full detail in the module header of
+> [`common/llm_client.py`](common/llm_client.py).
+
+> ℹ️ The Ollama endpoint is restricted to **loopback** (`localhost`/`127.0.0.1`)
+> in code — a deliberate, stricter stand-in for the Anthropic path's egress
+> allowlist. Remote Ollama is not supported by this refactor. Running the
+> *containerised* executor against host Ollama also needs host networking that
+> this refactor does not wire up (see the note in the CLI section); the
+> in-process executor reaches `localhost:11434` directly.
+
+---
+
 ## What it measures
 
 Four attack categories, each with a clear definition of "the attacker won":
@@ -73,8 +116,9 @@ Two secondary signals are reported alongside the headline success rate:
                           report/  ─► table + report.md
 ```
 
-- **`common/`** — config, timestamped JSONL logging, id generation, the checked
-  Anthropic client wrapper.
+- **`common/`** — config, timestamped JSONL logging, id generation, and the
+  provider-neutral LLM client layer (`llm_client.py`: the `LLMClient` interface
+  plus the Anthropic and Ollama backends and the `make_client` factory).
 - **`target_agent/`** — the agent under test: a raw function-calling loop
   (`agent.py`) over two sandboxed tools (`tools.py` + `sandbox.py`), a system
   prompt with a per-run canary (`prompts.py`), the egress allowlist (`net.py`),
@@ -103,14 +147,26 @@ python -m venv .venv
 pip install -e ".[dev]"
 ```
 
-### 2. Configure
+### 2. Start the local model (default backend)
+
+Install [Ollama](https://ollama.com), then pull the default model and confirm
+it's serving:
+
+```bash
+ollama pull qwen3:8b
+curl http://localhost:11434/api/tags   # should list qwen3:8b
+```
+
+(Skip this if you set `LLM_BACKEND=anthropic` — then set `ANTHROPIC_API_KEY` instead.)
+
+### 3. Configure
 
 ```bash
 cp .env.example .env
-# edit .env and set ANTHROPIC_API_KEY
+# defaults to LLM_BACKEND=ollama — no key needed. Edit only to switch backends.
 ```
 
-### 3. Verify containment (recommended before the first run)
+### 4. Verify containment (recommended before the first run)
 
 ```bash
 pytest tests/test_sandbox.py -v          # host-side path-traversal check
@@ -120,20 +176,21 @@ docker exec -i agent-redteam-target python -m target_agent --selftest
 docker compose -f docker/docker-compose.yml down -v
 ```
 
-### 4. Run a campaign
+### 5. Run a campaign
 
 ```bash
-# 10 prompt-injection attacks (seeds + LLM-generated variants), containerised:
-python -m runner --category prompt_injection --n 10
+# 5 prompt-injection attacks against the local Ollama backend, in-process:
+python -m runner --category prompt_injection --n 5 --no-docker
 
 # All four categories, 5 each:
 python -m runner --category all --n 5
 
-# Require Docker (fail if unavailable) — the right flag for real measurement:
+# Require Docker (fail if unavailable) — the right flag for real measurement
+# on the Anthropic backend (see the container+Ollama note below):
 python -m runner --category permission_escalation --n 8 --docker
 ```
 
-### 5. Report
+### 6. Report
 
 ```bash
 python -m report                    # latest run: table + results/<run>/report.md
@@ -164,6 +221,14 @@ starts the container, runs the in-container self-test, and only proceeds if it
 passes. Otherwise it falls back to **in-process execution**, clearly tagged
 `sandboxed=False` — fine for development, not for real measurement. Use
 `--docker` to require the sandbox.
+
+> ℹ️ **Container + Ollama:** the containerised executor reaches the model from
+> *inside* the container, where `localhost` is the container, not the host. This
+> refactor does not wire up host networking or add `host.docker.internal` to the
+> loopback allowlist (that would touch `docker-compose.yml`, which is out of
+> scope), so `--docker` currently pairs cleanly with the **Anthropic** backend.
+> For the local Ollama backend, use the in-process executor (`--no-docker`),
+> which reaches `localhost:11434` directly.
 
 ### `python -m report`
 
@@ -199,10 +264,11 @@ All of `results/`, `logs/`, and `sandbox/runs/` are git-ignored.
 
 ## Reproducibility
 
-Each run records the target/attacker/judge model ids, the guard, the egress
-allowlist, and a **SHA-256 fingerprint of the exact system prompt** it ran
-against — so a whole campaign is provably one prompt version, and changing the
-prompt shows up in the results instead of silently shifting the numbers.
+Each run records the LLM backend, the target/attacker/judge model ids, the
+guard, the egress allowlist, and a **SHA-256 fingerprint of the exact system
+prompt** it ran against — so a whole campaign is provably one backend and one
+prompt version, and changing either shows up in the results instead of silently
+shifting the numbers.
 
 Attacker variants are non-deterministic (they come from a model), but every
 generated variant records its `parent_id`, so any result traces back to the
@@ -244,13 +310,19 @@ ruff check .                 # lint
 ```
 
 The suite runs entirely offline: the agent loop is exercised against a scripted
-fake client, and all judging paths are tested with synthetic runs.
+fake client implementing the backend interface, the Ollama transport is stubbed,
+and all judging paths are tested with synthetic runs — no daemon, no API key.
 
 ## Requirements
 
 - Python 3.11+
-- Docker + Docker Compose (for real, sandboxed runs; optional for development)
-- An `ANTHROPIC_API_KEY`
+- **One model backend:**
+  - **Ollama** (default) — [install Ollama](https://ollama.com) and
+    `ollama pull qwen3:8b`. No API key. No extra Python dependency (the client
+    uses stdlib `urllib`).
+  - **Anthropic** (optional) — an `ANTHROPIC_API_KEY`, and `LLM_BACKEND=anthropic`.
+- Docker + Docker Compose — for real, sandboxed runs (optional for development;
+  currently pairs with the Anthropic backend, see the container+Ollama note above).
 
 ## License
 

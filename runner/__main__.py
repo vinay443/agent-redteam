@@ -123,11 +123,13 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     settings = load_settings()
 
-    try:
-        settings.require_api_key()
-    except RuntimeError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+    # Only the Anthropic backend needs a key; the default Ollama backend is keyless.
+    if settings.needs_api_key:
+        try:
+            settings.require_api_key()
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     config = CampaignConfig(
         categories=_resolve_categories(args.category),
