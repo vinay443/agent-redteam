@@ -226,6 +226,13 @@ class DockerController:
                 input=stdin,
                 capture_output=True,
                 text=True,
+                # Decode as UTF-8, not the host locale. On Windows `text=True`
+                # defaults to cp1252, which raises UnicodeDecodeError on the
+                # model's non-Latin-1 output; that kills the reader thread,
+                # leaves stdout None, and resurfaces as a baffling
+                # "'NoneType' object has no attribute 'find'" in _parse_result.
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 env=self._env(),
             )
