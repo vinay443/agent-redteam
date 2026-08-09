@@ -46,7 +46,7 @@ class Verdict:
     blocked_by_code: bool
     """True = a code-level boundary stopped the attack (vs the model declining)."""
 
-    method: str  # "code" | "llm" | "code+llm"
+    method: str  # "code" | "llm" | "code+llm" | "errored" (run never executed)
     confidence: float = 1.0
     rationale: str = ""
     signals: Signals = field(default_factory=Signals)

@@ -27,6 +27,16 @@ def _bar(rate: float, width: int = 20) -> str:
     return "[" + "#" * filled + "-" * (width - filled) + "]"
 
 
+def _rate_cell(rate: float, known: bool) -> str:
+    """A rate with no completed attacks behind it is n/a, never 0.0%."""
+    return f"{rate * 100:6.1f}%" if known else "n/a"
+
+
+def _success_cell(rate: float, known: bool) -> str:
+    # An empty bar would read as "0% success"; say why there is no bar instead.
+    return _bar(rate) if known else "(no attacks completed)"
+
+
 def render_table(metrics: CampaignMetrics) -> str:
     """A plain-text table for the console."""
     lines: list[str] = []
@@ -47,21 +57,29 @@ def render_table(metrics: CampaignMetrics) -> str:
     )
     lines.append("")
 
-    header = f"  {'category':<28}{'attacks':>8}{'wins':>6}{'rate':>8}  success"
+    header = f"  {'category':<28}{'attacks':>8}{'wins':>6}{'errored':>9}{'rate':>8}  success"
     lines.append(header)
     lines.append("  " + "-" * 74)
     for category in _ordered(metrics):
         cat = metrics.categories[category]
         lines.append(
-            f"  {category:<28}{cat.total:>8}{cat.succeeded:>6}"
-            f"{cat.success_rate * 100:>7.1f}%  {_bar(cat.success_rate)}"
+            f"  {category:<28}{cat.total:>8}{cat.succeeded:>6}{cat.errored:>9}"
+            f"{_rate_cell(cat.success_rate, cat.rate_known):>8}  "
+            f"{_success_cell(cat.success_rate, cat.rate_known)}"
         )
     lines.append("  " + "-" * 74)
     lines.append(
-        f"  {'OVERALL':<28}{metrics.total:>8}{metrics.succeeded:>6}"
-        f"{metrics.overall_success_rate * 100:>7.1f}%  {_bar(metrics.overall_success_rate)}"
+        f"  {'OVERALL':<28}{metrics.total:>8}{metrics.succeeded:>6}{metrics.errored:>9}"
+        f"{_rate_cell(metrics.overall_success_rate, metrics.rate_known):>8}  "
+        f"{_success_cell(metrics.overall_success_rate, metrics.rate_known)}"
     )
     lines.append("")
+    if metrics.errored:
+        lines.append(
+            f"  Note: {metrics.errored} attack(s) never ran (errored). "
+            "rate = wins / (attacks - errored)."
+        )
+        lines.append("")
 
     lines.append("  Defence attribution (of attacks that did NOT succeed):")
     for category in _ordered(metrics):
@@ -123,17 +141,24 @@ def render_markdown(metrics: CampaignMetrics) -> str:
     out.append("")
     out.append("Success = the attacker compromised the agent. Lower is safer.")
     out.append("")
-    out.append("| Category | Attacks | Wins | Success rate | Canary leaks |")
-    out.append("| --- | ---: | ---: | ---: | ---: |")
+    out.append(
+        "**Errored** attacks never executed (e.g. a container exec timeout), so they "
+        "are excluded from the rate: `rate = wins / (attacks - errored)`. They are "
+        "an absence of evidence, not a successful defence."
+    )
+    out.append("")
+    out.append("| Category | Attacks | Wins | Errored | Success rate | Canary leaks |")
+    out.append("| --- | ---: | ---: | ---: | ---: | ---: |")
     for category in _ordered(metrics):
         cat = metrics.categories[category]
         out.append(
-            f"| {category} | {cat.total} | {cat.succeeded} "
-            f"| {cat.success_rate * 100:.1f}% | {cat.canary_leaks} |"
+            f"| {category} | {cat.total} | {cat.succeeded} | {cat.errored} "
+            f"| {_rate_cell(cat.success_rate, cat.rate_known).strip()} | {cat.canary_leaks} |"
         )
+    overall_rate = _rate_cell(metrics.overall_success_rate, metrics.rate_known).strip()
     out.append(
         f"| **Overall** | **{metrics.total}** | **{metrics.succeeded}** "
-        f"| **{metrics.overall_success_rate * 100:.1f}%** | — |"
+        f"| **{metrics.errored}** | **{overall_rate}** | — |"
     )
     out.append("")
 
