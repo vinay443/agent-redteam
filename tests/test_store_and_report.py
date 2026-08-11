@@ -1,11 +1,15 @@
-"""Persistence round-trips and metric aggregation."""
+"""Persistence round-trips, metric aggregation, and report rendering."""
 
 from __future__ import annotations
 
+import csv
+import io
+
 from attacker.models import Attack
 from judge.models import Signals, Verdict
+from report.__main__ import main as report_main
 from report.metrics import compute_metrics
-from report.render import render_markdown, render_table
+from report.render import CSV_COLUMNS, render_csv, render_markdown, render_table
 from runner.store import ResultStore
 
 
@@ -206,6 +210,118 @@ def test_all_errored_run_renders_without_dividing_by_zero(tmp_path):
     assert "n/a" in render_table(metrics)
     assert render_markdown(metrics)  # must not raise
     store.close()
+
+
+# --- CSV export --------------------------------------------------------------
+#
+# NB: there is no test for embedded commas/quotes. Every CSV field is either an
+# integer, a float, or a category name, and category names come from
+# attacker.models.CATEGORIES — fixed identifiers like "prompt_injection" that
+# cannot contain a comma or a quote. Rather than invent an unreachable case, the
+# quoting guarantee is left to the stdlib csv module these renderers use.
+
+
+def _csv_store(tmp_path, run_id="run-csv"):
+    """A store with one win, one loss, and an all-errored second category."""
+    store = ResultStore(tmp_path / "results.sqlite3")
+    store.record_run(run_id, {})
+    specs = [
+        (_attack("pi-1", "prompt_injection"), _verdict(_attack("pi-1"), success=True)),
+        (_attack("pi-2", "prompt_injection"), _verdict(_attack("pi-2"), success=False)),
+        (
+            _attack("gh-1", "goal_hijacking"),
+            _verdict(_attack("gh-1", "goal_hijacking"), success=False, method="errored"),
+        ),
+    ]
+    for attack, verdict in specs:
+        store.record_attack(
+            run_id=run_id,
+            attack=attack.to_dict(),
+            run={"run_id": run_id, "attack_id": attack.id, "tool_calls": []},
+            verdict=verdict.to_dict(),
+        )
+    return store
+
+
+def _parse_csv(text):
+    return list(csv.reader(io.StringIO(text)))
+
+
+def test_render_csv_header_and_one_row_per_category_plus_overall(tmp_path):
+    store = _csv_store(tmp_path)
+    metrics = compute_metrics("run-csv", store.run_meta("run-csv"), store.results("run-csv"))
+
+    rows = _parse_csv(render_csv(metrics))
+
+    assert rows[0] == list(CSV_COLUMNS)
+    assert len(rows) == 1 + len(metrics.categories) + 1  # header + categories + OVERALL
+
+    by_category = {row[0]: row for row in rows[1:]}
+    assert set(by_category) == {"prompt_injection", "goal_hijacking", "OVERALL"}
+
+    # category, attacks, wins, errored, scored, success_rate, canary_leaks
+    assert by_category["prompt_injection"] == ["prompt_injection", "2", "1", "0", "2", "0.5", "0"]
+    assert by_category["OVERALL"] == ["OVERALL", "3", "1", "1", "2", "0.5", "0"]
+    store.close()
+
+
+def test_render_csv_unknown_rate_is_an_empty_cell(tmp_path):
+    store = _csv_store(tmp_path)
+    metrics = compute_metrics("run-csv", store.run_meta("run-csv"), store.results("run-csv"))
+
+    rows = _parse_csv(render_csv(metrics))
+    goal_hijacking = next(row for row in rows if row[0] == "goal_hijacking")
+
+    rate = goal_hijacking[CSV_COLUMNS.index("success_rate")]
+    assert rate == ""  # not "n/a" (breaks numeric columns), not "0.0" (a lie)
+    assert goal_hijacking[CSV_COLUMNS.index("errored")] == "1"
+    assert goal_hijacking[CSV_COLUMNS.index("scored")] == "0"
+    store.close()
+
+
+def test_cli_format_csv_writes_report_csv(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path))
+    _csv_store(tmp_path).close()
+
+    exit_code = report_main(["--run-id", "run-csv", "--format", "csv"])
+
+    assert exit_code == 0
+    out_path = tmp_path / "run-csv" / "report.csv"
+    assert out_path.exists()
+
+    rows = _parse_csv(out_path.read_text(encoding="utf-8"))
+    assert rows[0] == list(CSV_COLUMNS)
+    assert rows[-1][0] == "OVERALL"
+
+    stdout = capsys.readouterr().out
+    assert str(out_path) in stdout
+    assert "Defence attribution" not in stdout  # the console table is suppressed
+    assert not (tmp_path / "run-csv" / "report.md").exists()
+
+
+def test_cli_format_csv_with_no_file_prints_to_stdout(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path))
+    _csv_store(tmp_path).close()
+
+    assert report_main(["--run-id", "run-csv", "--format", "csv", "--no-file"]) == 0
+
+    rows = _parse_csv(capsys.readouterr().out)
+    assert rows[0] == list(CSV_COLUMNS)
+    assert not (tmp_path / "run-csv" / "report.csv").exists()
+
+
+def test_cli_default_format_still_prints_the_table_and_writes_markdown(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path))
+    _csv_store(tmp_path).close()
+
+    assert report_main(["--run-id", "run-csv"]) == 0
+
+    stdout = capsys.readouterr().out
+    assert "Defence attribution" in stdout
+    assert (tmp_path / "run-csv" / "report.md").exists()
+    assert not (tmp_path / "run-csv" / "report.csv").exists()
 
 
 def test_containment_failure_is_flagged(tmp_path):

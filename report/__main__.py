@@ -1,9 +1,10 @@
-"""CLI: turn stored results into a table and a Markdown report.
+"""CLI: turn stored results into a table, a Markdown report, or a CSV export.
 
     python -m report                       # latest run, table to stdout + report file
     python -m report --run-id run-...       # a specific run
     python -m report --list                 # list available runs
     python -m report --json                 # emit the metrics as JSON
+    python -m report --format csv           # write results/<run_id>/report.csv
 """
 
 from __future__ import annotations
@@ -11,10 +12,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from common.config import load_settings
 from report.metrics import compute_metrics
-from report.render import render_markdown, render_table
+from report.render import render_csv, render_markdown, render_table
 from runner.store import ResultStore
 
 __all__ = ["main"]
@@ -29,14 +31,27 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--list", action="store_true", help="List available runs and exit.")
     parser.add_argument("--json", action="store_true", help="Print metrics as JSON to stdout.")
     parser.add_argument(
+        "--format",
+        dest="output_format",
+        choices=("text", "markdown", "csv"),
+        default="text",
+        help=(
+            "text (default): console table; markdown: the Markdown report to stdout; "
+            "csv: write results/<run_id>/report.csv instead of printing the table."
+        ),
+    )
+    parser.add_argument(
         "--out",
         default=None,
-        help="Markdown output path (default: results/<run_id>/report.md).",
+        help=(
+            "Output file path (default: results/<run_id>/report.md, "
+            "or report.csv with --format csv)."
+        ),
     )
     parser.add_argument(
         "--no-file",
         action="store_true",
-        help="Do not write the Markdown report file.",
+        help="Do not write a report file (with --format csv, print the CSV to stdout).",
     )
     return parser.parse_args(argv)
 
@@ -116,16 +131,29 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(metrics.to_dict(), indent=2))
             return 0
 
-        print(render_table(metrics))
+        if args.output_format == "csv":
+            # A CSV run is an export, not a read: the console table would just
+            # bury the one line that says where the file went.
+            csv_text = render_csv(metrics)
+            if args.no_file:
+                print(csv_text, end="")
+            else:
+                path = Path(args.out or settings.run_dir(run_id) / "report.csv")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(csv_text, encoding="utf-8")
+                print(f"CSV report written to {path}")
+        else:
+            print(
+                render_markdown(metrics)
+                if args.output_format == "markdown"
+                else render_table(metrics)
+            )
 
-        if not args.no_file:
-            out_path = args.out or str(settings.run_dir(run_id) / "report.md")
-            from pathlib import Path
-
-            path = Path(out_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(render_markdown(metrics), encoding="utf-8")
-            print(f"\nMarkdown report written to {path}")
+            if not args.no_file:
+                path = Path(args.out or settings.run_dir(run_id) / "report.md")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(render_markdown(metrics), encoding="utf-8")
+                print(f"\nMarkdown report written to {path}")
 
         if not metrics.containment_ok:
             return 3  # signal a containment failure to CI
