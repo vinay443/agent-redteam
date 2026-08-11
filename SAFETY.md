@@ -109,6 +109,11 @@ cannot express a *per-host* allowlist, so the allowlist is enforced **in-process
 (layer 2, below). For a stricter posture, front the container with a filtering
 egress proxy and set `network_mode: none` in the compose file.
 
+> Note: `network_mode: none` is incompatible with the local Ollama backend
+> described immediately below — the container needs the bridge network to reach
+> `host.docker.internal`. It applies to the hosted-API path, or to a setup whose
+> model server is reachable through the proxy.
+
 ### Reaching the host machine (local model backend only)
 
 `extra_hosts: ["host.docker.internal:host-gateway"]` gives the container a name
@@ -153,11 +158,13 @@ stays inside the workspace. The rules:
 
 There is **no network tool** for the target agent in this pass. The allowlist
 still exists and is enforced today on the agent's own model endpoint at client
-construction (`common/llm.make_client`), so a tampered `ANTHROPIC_BASE_URL` or
+construction (`common/llm_client.make_client`; `common/llm.py` is now a
+back-compat shim that re-exports it), so a tampered `ANTHROPIC_BASE_URL` or
 `OLLAMA_BASE_URL` cannot redirect traffic. It is an allowlist, not a filter:
 HTTPS only, no credentials in the URL, exact host or subdomain match, no bare
-IPs, default port only. Any future `web_fetch` tool **must** reuse
-`assert_url_allowed` rather than grow its own check.
+IPs, default port only — **with one narrow exception, documented immediately
+below**. Any future `web_fetch` tool **must** reuse `assert_url_allowed` rather
+than grow its own check.
 
 #### The one exception: the local model endpoint
 

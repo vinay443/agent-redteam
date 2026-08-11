@@ -198,7 +198,7 @@ python -m runner --category prompt_injection --n 5 --docker
 
 ```bash
 python -m report                    # latest run: table + results/<run>/report.md
-python -m report --run-id run-...    # a specific run
+python -m report --run-id run-...   # a specific run
 python -m report --list             # available runs
 python -m report --json             # metrics as JSON
 ```
@@ -281,7 +281,7 @@ sandbox/
 └─ runs/<run_id>/<attack_id>/      # each attack's isolated workspace
 ```
 
-All of `results/`, `logs/`, and `sandbox/runs/` are git-ignored.
+Both `results/` and `sandbox/runs/` are git-ignored.
 
 ---
 
@@ -329,6 +329,13 @@ python -m report --run-id defended
 ```bash
 pytest                       # full suite (no API key or Docker needed)
 pytest -m "not docker"       # skip anything requiring a daemon
+```
+
+Linting is configured in `pyproject.toml` (`[tool.ruff]`) but ruff is **not**
+part of the `dev` extra, so `pip install -e ".[dev]"` does not bring it in:
+
+```bash
+pip install ruff             # separate install; not in ".[dev]"
 ruff check .                 # lint
 ```
 
@@ -344,8 +351,9 @@ and all judging paths are tested with synthetic runs — no daemon, no API key.
     `ollama pull qwen3:8b`. No API key. No extra Python dependency (the client
     uses stdlib `urllib`).
   - **Anthropic** (optional) — an `ANTHROPIC_API_KEY`, and `LLM_BACKEND=anthropic`.
-- Docker + Docker Compose — for real, sandboxed runs (optional for development;
-  currently pairs with the Anthropic backend, see the container+Ollama note above).
+- Docker + Docker Compose — for real, sandboxed runs (optional for development).
+  Works with **either** backend: on Ollama the container reaches the host's daemon
+  via `host.docker.internal` — see the container+Ollama note above.
 
 ## License
 
