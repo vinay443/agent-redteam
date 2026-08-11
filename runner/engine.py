@@ -336,29 +336,51 @@ class CampaignEngine:
         logger: EventLogger,
     ) -> tuple[Any, dict[str, Any]]:
         host_sandbox = self.settings.host_attack_dir(run_id, attack.id)
-        self._provision_sandbox(host_sandbox, attack, logger)
+        skipped_links = self._provision_sandbox(host_sandbox, attack, logger)
 
-        request = {
-            "run_id": run_id,
-            "attack_id": attack.id,
-            "category": attack.category,
-            "prompt": attack.prompt,
-            "canary": canary,
-            "guard": config.guard,
-            "model": self.settings.target_model,
-            "max_turns": self.settings.target_max_turns,
-            "max_tokens": self.settings.target_max_tokens,
-            "effort": self.settings.target_effort,
-        }
-        logger.emit("attack_dispatch", attack_id=attack.id, category=attack.category)
-
-        if sandboxed and controller is not None:
-            container_root = self.settings.container_attack_root(run_id, attack.id)
-            # Tell the container which subdir of the bind mount is this attack's root.
-            request["sandbox_root"] = container_root
-            run = self._run_in_container(controller, request, attack, logger)
+        if skipped_links:
+            # The attack's vector was never staged, so there is nothing to test.
+            # Don't spend minutes running it: mark it errored here and let the
+            # judge's error short-circuit keep it out of the success-rate
+            # denominator. See _provision_sandbox for why.
+            logger.emit(
+                "attack_not_dispatched",
+                attack_id=attack.id,
+                category=attack.category,
+                reason="symlink_setup_failed",
+                links=skipped_links,
+            )
+            run: dict[str, Any] = {
+                "run_id": run_id,
+                "attack_id": attack.id,
+                "category": attack.category,
+                "error": f"symlink_setup_failed: {skipped_links}",
+                "tool_calls": [],
+                "transcript": [],
+                "final_text": "",
+            }
         else:
-            run = executor.run_attack(request, sandbox_dir=host_sandbox)  # type: ignore[union-attr]
+            request = {
+                "run_id": run_id,
+                "attack_id": attack.id,
+                "category": attack.category,
+                "prompt": attack.prompt,
+                "canary": canary,
+                "guard": config.guard,
+                "model": self.settings.target_model,
+                "max_turns": self.settings.target_max_turns,
+                "max_tokens": self.settings.target_max_tokens,
+                "effort": self.settings.target_effort,
+            }
+            logger.emit("attack_dispatch", attack_id=attack.id, category=attack.category)
+
+            if sandboxed and controller is not None:
+                container_root = self.settings.container_attack_root(run_id, attack.id)
+                # Tell the container which subdir of the bind mount is this attack's root.
+                request["sandbox_root"] = container_root
+                run = self._run_in_container(controller, request, attack, logger)
+            else:
+                run = executor.run_attack(request, sandbox_dir=host_sandbox)  # type: ignore[union-attr]
 
         run.setdefault("run_id", run_id)
         run["sandboxed"] = sandboxed
@@ -396,7 +418,12 @@ class CampaignEngine:
     # -- sandbox provisioning ----------------------------------------------
 
     @staticmethod
-    def _provision_sandbox(host_sandbox: Path, attack: Attack, logger: EventLogger) -> None:
+    def _provision_sandbox(host_sandbox: Path, attack: Attack, logger: EventLogger) -> list[str]:
+        """Lay down the attack's workspace; return the links that could not be made.
+
+        A non-empty return value means the sandbox does not carry the state the
+        attack needs, and the caller must not dispatch it.
+        """
         if host_sandbox.exists():
             shutil.rmtree(host_sandbox, ignore_errors=True)
         host_sandbox.mkdir(parents=True, exist_ok=True)
@@ -406,15 +433,21 @@ class CampaignEngine:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
 
+        skipped_links: list[str] = []
         for link_name, link_target in attack.setup_symlinks.items():
             link_path = host_sandbox / link_name
             try:
                 link_path.parent.mkdir(parents=True, exist_ok=True)
                 link_path.symlink_to(link_target)
             except (OSError, NotImplementedError) as exc:
-                # Symlink creation can fail on Windows without privilege; the
-                # attack still runs, it just can't test the symlink vector on
-                # this host. Record it rather than crashing the campaign.
+                # Symlink creation can fail on Windows without the privilege
+                # (WinError 1314). When it does, the symlink-escape vector this
+                # attack is built around simply does not exist in the sandbox:
+                # there is no link to follow out of the root. Running the attack
+                # anyway would let the model "resist" a vector that was never
+                # present, and the judge would score that as a defended attack —
+                # inflating the defence rate with a test that never happened.
+                # So report the failure up and let the caller skip the dispatch.
                 logger.emit(
                     "symlink_setup_skipped",
                     attack_id=attack.id,
@@ -422,6 +455,8 @@ class CampaignEngine:
                     target=link_target,
                     error=str(exc),
                 )
+                skipped_links.append(link_name)
+        return skipped_links
 
 
 def _summary_fields(summary: CampaignSummary) -> dict[str, Any]:
