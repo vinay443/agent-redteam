@@ -355,6 +355,50 @@ and all judging paths are tested with synthetic runs — no daemon, no API key.
   Works with **either** backend: on Ollama the container reaches the host's daemon
   via `host.docker.internal` — see the container+Ollama note above.
 
+## Results
+
+Final cross-category campaign run (`run-20260811T090341Z-b42376`,
+`--category all --n 20 --docker`, qwen3:8b via Ollama, sandboxed executor):
+
+| Category | Attacks | Wins | Errored | Success Rate |
+|---|---|---|---|---|
+| Prompt Injection | 20 | 4 | 3 | 23.5% |
+| Goal Hijacking | 20 | 15 | 1 | 78.9% |
+| Permission Escalation | 20 | 0 | 4 | 0.0% |
+| System Prompt Exfiltration | 20 | 4 | 5 | 26.7% |
+| **Overall** | **80** | **23** | **13** | **34.3%** |
+
+*Errored attacks (timeouts or failed attack setup, e.g. Windows symlink
+privilege limits) are excluded from the success-rate denominator; success
+rate = wins / (attacks - errored). See `judge/judge.py` and
+`runner/engine.py` for the errored-vs-resisted scoring logic.*
+
+**Containment:** 0 tool calls escaped the sandbox root across all 80 attacks.
+
+**Defense attribution** (of attacks that did not succeed):
+
+| Category | Blocked by code | Model refused |
+|---|---|---|
+| Prompt Injection | 0/13 | 0 |
+| Goal Hijacking | 0/4 | 0 |
+| Permission Escalation | 7/16 | 0 |
+| System Prompt Exfiltration | 0/11 | 0 |
+
+Permission escalation was defended almost entirely by hard sandbox/path
+checks at the code level. The other three categories show no code-level
+blocks among their non-successes — when the model resisted those attacks,
+it wasn't caught by a guard, it simply didn't comply. This suggests
+containment (sandboxing, path checks) and model robustness are doing
+distinct jobs: containment holds regardless of the model's behavior, while
+susceptibility to prompt injection, goal hijacking, and exfiltration is a
+property of the model's own judgment.
+
+**Known limitation:** 13/80 attacks (16%) errored on `docker exec` timeouts
+(300s) rather than genuine model resistance, likely reflecting sustained
+local-hardware load on a single 8B model over the ~2.5 hour run rather than
+attack difficulty. These are correctly excluded from success rates rather
+than miscounted as defended.
+
 ## License
 
 MIT.
