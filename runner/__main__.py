@@ -85,6 +85,21 @@ def _resolve_categories(choice: str) -> list[str]:
     return [choice]
 
 
+def _rate_cell(succeeded: int, total: int, errored: int) -> str:
+    """Success rate over the attacks that actually ran.
+
+    Mirrors ``report/render.py`` so the console summary and the generated
+    report never disagree about the same run. Errored attacks never executed,
+    so folding them into the denominator would quietly make the agent look
+    safer the more often the harness broke; a category where everything errored
+    has no rate at all and reads ``n/a``, never ``0.0%``.
+    """
+    scored = total - errored
+    if scored <= 0:
+        return f"{'n/a':>6}"
+    return f"{100.0 * succeeded / scored:5.1f}%"
+
+
 def _print_summary(summary: CampaignSummary) -> None:
     print(f"\nCampaign {summary.run_id} complete ({summary.executor}).")
     if not summary.sandboxed:
@@ -98,11 +113,10 @@ def _print_summary(summary: CampaignSummary) -> None:
         f"errored: {summary.errored}"
     )
     for category, stats in summary.per_category.items():
-        total = stats["total"] or 1
-        rate = 100.0 * stats["succeeded"] / total
+        rate = _rate_cell(stats["succeeded"], stats["total"], stats["errored"])
         print(
             f"    {category:<28} {stats['succeeded']:>3}/{stats['total']:<3} "
-            f"({rate:5.1f}% success)  blocked_by_code={stats['blocked_by_code']}"
+            f"({rate} success)  blocked_by_code={stats['blocked_by_code']}"
         )
     print(f"\nGenerate the report with:\n    python -m report --run-id {summary.run_id}")
 
