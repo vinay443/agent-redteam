@@ -201,6 +201,7 @@ python -m report                    # latest run: table + results/<run>/report.m
 python -m report --run-id run-...   # a specific run
 python -m report --list             # available runs
 python -m report --json             # metrics as JSON
+python -m report --format csv       # export results/<run>/report.csv
 ```
 
 ---
@@ -260,8 +261,9 @@ passes. Otherwise it falls back to **in-process execution**, clearly tagged
 | `--run-id` | Run to report on (default: latest) |
 | `--list` | List available runs |
 | `--json` | Emit metrics as JSON |
-| `--out` | Markdown output path |
-| `--no-file` | Don't write the Markdown file |
+| `--format` | `text` (default: console table) \| `markdown` (report to stdout) \| `csv` (write `report.csv`) |
+| `--out` | Output file path (default: `results/<run_id>/report.md`, or `report.csv` with `--format csv`) |
+| `--no-file` | Don't write the report file (with `--format csv`, print the CSV to stdout instead) |
 
 `report` exits non-zero (`3`) if it detects a containment failure, so it can gate
 CI.
@@ -343,6 +345,11 @@ The suite runs entirely offline: the agent loop is exercised against a scripted
 fake client implementing the backend interface, the Ollama transport is stubbed,
 and all judging paths are tested with synthetic runs — no daemon, no API key.
 
+GitHub Actions runs exactly those two commands — `ruff check .` and
+`pytest tests/ -q` — on every push and pull request to `main`
+([`.github/workflows/tests.yml`](.github/workflows/tests.yml)). CI installs
+neither Docker nor Ollama, because the offline suite needs neither.
+
 ## Requirements
 
 - Python 3.11+
@@ -393,11 +400,12 @@ distinct jobs: containment holds regardless of the model's behavior, while
 susceptibility to prompt injection, goal hijacking, and exfiltration is a
 property of the model's own judgment.
 
-**Known limitation:** 13/80 attacks (16%) errored on `docker exec` timeouts
-(300s) rather than genuine model resistance, likely reflecting sustained
-local-hardware load on a single 8B model over the ~2.5 hour run rather than
-attack difficulty. These are correctly excluded from success rates rather
-than miscounted as defended.
+**Known limitation:** 13/80 attacks (16%) errored rather than meeting genuine
+model resistance — 9 on `docker exec` timeouts (300s), likely reflecting
+sustained local-hardware load on a single 8B model over the ~2.5 hour run
+rather than attack difficulty, and 4 on the Windows symlink limitation noted
+below. These are correctly excluded from success rates rather than miscounted
+as defended.
 
 ## Results (qwen3:4b, resource-constrained default)
 
@@ -434,6 +442,18 @@ attack was never dispatched; it is excluded from the denominator
 (8/76 = 10.5%) rather than miscounted as defended. Unlike the 8b baseline, this
 run had **no `docker exec` timeouts** — the errors are a host-privilege
 limitation, not hardware load.
+
+> ℹ️ **Host limitation — `pe-004-symlink-escape` on Windows.** This attack stages
+> its vector by creating a symlink, which Windows refuses without elevated
+> privileges (Administrator or Developer Mode). On such a host the seed and its
+> three variants fail setup with `symlink_setup_failed: ['host-etc']` and are
+> never dispatched — that is the 4 errored permission-escalation attacks in
+> **both** runs above. This is a **host OS limitation, not a containment
+> failure**: nothing escaped the sandbox, the attack simply never ran. It is
+> excluded from the success-rate denominator rather than miscounted as a
+> defended attack. On a Linux/macOS host the vector stages normally, and symlink
+> escape is asserted inside the Linux container by
+> `python -m target_agent --selftest`.
 
 ### Why qwen3:4b, and why these two tables are not comparable
 

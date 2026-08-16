@@ -1,0 +1,47 @@
+# Offline test suite.
+#
+# Scope is deliberately identical to a local `ruff check .` + `pytest tests/ -q`:
+# the suite runs entirely offline (scripted fake LLM clients, stubbed Ollama
+# transport, synthetic judge runs), so CI installs no Docker daemon, no Ollama,
+# and needs no API key. Containerised runs and real model calls stay a local /
+# manual step — see README.md and SAFETY.md.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # pyproject.toml declares requires-python = ">=3.11" and ruff
+          # target-version = "py311", so CI exercises the declared floor.
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # The setup the README documents. The `dev` extra is pytest +
+          # pytest-cov; the editable install puts the top-level packages
+          # (common, target_agent, attacker, judge, runner, report) on the path.
+          pip install -e ".[dev]"
+          # ruff is deliberately not part of the `dev` extra (see pyproject.toml
+          # and README "Testing"), so it is installed separately. Pinned so a
+          # new upstream rule cannot turn a green branch red on its own.
+          pip install ruff==0.16.2
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest tests/ -q
