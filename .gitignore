@@ -24,3 +24,5 @@ sandbox/*
 # OS junk
 .DS_Store
 results/
+stop-services.sh
+stop-services.sh

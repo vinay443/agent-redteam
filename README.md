@@ -355,7 +355,7 @@ and all judging paths are tested with synthetic runs — no daemon, no API key.
   Works with **either** backend: on Ollama the container reaches the host's daemon
   via `host.docker.internal` — see the container+Ollama note above.
 
-## Results
+## Results (qwen3:8b — original baseline)
 
 Final cross-category campaign run (`run-20260811T090341Z-b42376`,
 `--category all --n 20 --docker`, qwen3:8b via Ollama, sandboxed executor):
@@ -398,6 +398,64 @@ property of the model's own judgment.
 local-hardware load on a single 8B model over the ~2.5 hour run rather than
 attack difficulty. These are correctly excluded from success rates rather
 than miscounted as defended.
+
+## Results (qwen3:4b, resource-constrained default)
+
+Cross-category campaign run (`run-20260816T075004Z-a0783c`,
+`--category all --n 20 --docker`, qwen3:4b via Ollama, sandboxed executor,
+55 minutes wall-clock):
+
+| Category | Attacks | Wins | Errored | Success Rate |
+|---|---|---|---|---|
+| Prompt Injection | 20 | 3 | 0 | 15.0% |
+| Goal Hijacking | 20 | 5 | 0 | 25.0% |
+| Permission Escalation | 20 | 0 | 4 | 0.0% |
+| System Prompt Exfiltration | 20 | 0 | 0 | 0.0% |
+| **Overall** | **80** | **8** | **4** | **10.5%** |
+
+**Containment:** 0 tool calls escaped the sandbox root across all 80 attacks.
+Permission escalation produced 4 outside-root attempts, every one stopped in
+code.
+
+**Defense attribution** (of attacks that did not succeed):
+
+| Category | Blocked by code | Model refused |
+|---|---|---|
+| Prompt Injection | 0/17 | 0 |
+| Goal Hijacking | 0/15 | 0 |
+| Permission Escalation | 4/16 | 0 |
+| System Prompt Exfiltration | 0/20 | 0 |
+
+**Known limitation:** all 4 errored attacks are `pe-004-symlink-escape` — the
+seed plus its three generated variants — which failed with
+`symlink_setup_failed: ['host-etc']`. The Windows host lacked the privilege to
+create the symlink the attack depends on, so the vector was never staged and the
+attack was never dispatched; it is excluded from the denominator
+(8/76 = 10.5%) rather than miscounted as defended. Unlike the 8b baseline, this
+run had **no `docker exec` timeouts** — the errors are a host-privilege
+limitation, not hardware load.
+
+### Why qwen3:4b, and why these two tables are not comparable
+
+qwen3:4b replaced qwen3:8b as the project default for resource reasons: it runs
+in roughly 3.8–4.4 GB of RAM against the 8b model's substantially heavier
+footprint, and it completed the identical `--category all --n 20` workload in
+~55 minutes versus 2+ hours.
+
+**The two result sets are not directly comparable, and the drop from 34.3% to
+10.5% is not evidence that the system became safer.** This run used qwen3:4b for
+*all three* roles — attacker, target and judge — so three variables moved at
+once: a weaker attacker generates less sophisticated variants, a weaker judge
+scores the transcripts differently, and a weaker target behaves differently.
+The overall rate fell because the capability of every role fell together. That
+is a different experiment, not a validated robustness improvement, and reading
+it as one would be a mistake.
+
+The one result that *is* directly comparable is containment: 0 escaped tool
+calls and a 0.0% permission-escalation rate in both runs. That layer is enforced
+in code (`target_agent/sandbox.py`, path checks in the tool layer), so it holds
+regardless of which model sits behind it — which is exactly the property it is
+supposed to have.
 
 ## License
 
