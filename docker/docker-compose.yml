@@ -52,7 +52,7 @@ services:
       # host's daemon is reached through the host.docker.internal alias mapped
       # by extra_hosts below.
       OLLAMA_BASE_URL: ${OLLAMA_CONTAINER_BASE_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b}
       OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-300}
       OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
 

@@ -25,7 +25,7 @@ from common.llm_client import (
     ["http://localhost:11434", "http://127.0.0.1:11434", "https://localhost:1234"],
 )
 def test_loopback_urls_accepted(url):
-    client = OllamaClient(base_url=url, model="qwen3:8b")
+    client = OllamaClient(base_url=url, model="qwen3:4b")
     assert client.base_url == url.rstrip("/")
 
 
@@ -40,7 +40,7 @@ def test_loopback_urls_accepted(url):
 )
 def test_non_loopback_urls_rejected(url):
     with pytest.raises(LLMError):
-        OllamaClient(base_url=url, model="qwen3:8b")
+        OllamaClient(base_url=url, model="qwen3:4b")
 
 
 # --- container endpoint (host.docker.internal) -------------------------------
@@ -51,7 +51,7 @@ CONTAINER_ALLOW = ("api.anthropic.com", "host.docker.internal:11434")
 def test_container_endpoint_accepted_when_allowlisted():
     client = OllamaClient(
         base_url="http://host.docker.internal:11434",
-        model="qwen3:8b",
+        model="qwen3:4b",
         egress_allowlist=CONTAINER_ALLOW,
     )
     assert client.base_url == "http://host.docker.internal:11434"
@@ -66,7 +66,7 @@ def test_container_endpoint_accepted_when_allowlisted():
 )
 def test_container_allowlist_does_not_widen(url):
     with pytest.raises(LLMError):
-        OllamaClient(base_url=url, model="qwen3:8b", egress_allowlist=CONTAINER_ALLOW)
+        OllamaClient(base_url=url, model="qwen3:4b", egress_allowlist=CONTAINER_ALLOW)
 
 
 def test_loopback_inside_container_is_a_loud_error(monkeypatch):
@@ -74,7 +74,7 @@ def test_loopback_inside_container_is_a_loud_error(monkeypatch):
     # misconfiguration message instead of a confusing connection error.
     monkeypatch.setattr("common.llm_client._in_container", lambda: True)
     with pytest.raises(LLMError, match="inside the container"):
-        OllamaClient(base_url="http://localhost:11434", model="qwen3:8b")
+        OllamaClient(base_url="http://localhost:11434", model="qwen3:4b")
 
 
 # --- tool schema conversion --------------------------------------------------
@@ -99,7 +99,7 @@ def test_tool_conversion_to_ollama_shape():
 # --- message construction ----------------------------------------------------
 
 def test_ollama_tool_results_are_one_message_per_result():
-    client = OllamaClient(base_url="http://localhost:11434", model="qwen3:8b")
+    client = OllamaClient(base_url="http://localhost:11434", model="qwen3:4b")
     results = [
         ToolResult(tool_use_id="a", name="read_file", content="x", is_error=False),
         ToolResult(tool_use_id="b", name="write_file", content="y", is_error=True),
@@ -113,7 +113,7 @@ def test_ollama_tool_results_are_one_message_per_result():
 # --- response parsing (stubbed transport) ------------------------------------
 
 def _ollama(monkeypatch, payload):
-    client = OllamaClient(base_url="http://localhost:11434", model="qwen3:8b")
+    client = OllamaClient(base_url="http://localhost:11434", model="qwen3:4b")
     monkeypatch.setattr(client, "_post", lambda path, body: payload)
     return client
 
@@ -209,7 +209,7 @@ def test_make_client_defaults_to_ollama(monkeypatch):
     assert settings.llm_backend == "ollama"
     client = make_client(settings)
     assert isinstance(client, OllamaClient)
-    assert settings.target_model == "qwen3:8b"  # role default follows backend
+    assert settings.target_model == "qwen3:4b"  # role default follows backend
 
 
 def test_make_client_anthropic_requires_key(monkeypatch):

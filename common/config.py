@@ -26,7 +26,7 @@ DEFAULT_EGRESS_ALLOWLIST: tuple[str, ...] = ("api.anthropic.com",)
 # The lab defaults to a local Ollama backend; Anthropic is opt-in.
 SUPPORTED_BACKENDS: tuple[str, ...] = ("ollama", "anthropic")
 DEFAULT_BACKEND = "ollama"
-DEFAULT_OLLAMA_MODEL = "qwen3:8b"
+DEFAULT_OLLAMA_MODEL = "qwen3:4b"
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-5"
 
 # Container-side path of the bind mount. Must match docker-compose.yml.

@@ -5,7 +5,7 @@ implementations satisfy it:
 
 * :class:`AnthropicClient` — the original hosted path, unchanged in behaviour
   (adaptive thinking, effort, native structured outputs, native tool use).
-* :class:`OllamaClient` — a local backend with ``qwen3:8b`` (the project
+* :class:`OllamaClient` — a local backend with ``qwen3:4b`` (the project
   default), hitting ``http://localhost:11434`` on the host and
   ``http://host.docker.internal:11434`` from inside the target container.
 
@@ -29,7 +29,7 @@ knowing.
 
 ## Tool-calling reliability — READ THIS
 
-``qwen3:8b`` on Ollama supports **native function/tool calling**: `/api/chat`
+``qwen3:4b`` on Ollama supports **native function/tool calling**: `/api/chat`
 returns structured ``message.tool_calls`` and accepts ``role:"tool"`` results,
 so this backend uses that native path — no brittle prompt-based "emit JSON in
 your reply" parsing. Verified empirically before this was written.
@@ -37,7 +37,7 @@ your reply" parsing. Verified empirically before this was written.
 That said, tool-use reliability is still **materially lower than a frontier
 hosted model's**, and the difference is the model, not the plumbing:
 
-* an 8B local model follows tool schemas and multi-step instructions less
+* a 4B local model follows tool schemas and multi-step instructions less
   consistently — it may skip a tool, hallucinate an argument, or answer in prose
   when it should have called a tool;
 * ``qwen3`` is a *reasoning* model: it emits a separate ``thinking`` stream and

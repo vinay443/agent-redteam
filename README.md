@@ -29,7 +29,7 @@ config switch (`LLM_BACKEND`):
 
 | Backend | Default? | Model | Needs a key? | Notes |
 | --- | --- | --- | --- | --- |
-| **Ollama** (local) | ✅ yes | `qwen3:8b` | No | Runs on your machine at `http://localhost:11434`. |
+| **Ollama** (local) | ✅ yes | `qwen3:4b` | No | Runs on your machine at `http://localhost:11434`. |
 | **Anthropic** (hosted) | opt-in | `claude-opus-5` | Yes (`ANTHROPIC_API_KEY`) | The original path, unchanged. |
 
 Switch backends by editing one line in `.env`:
@@ -42,10 +42,10 @@ LLM_BACKEND=ollama       # default — local, no key
 Per-role models (`TARGET_MODEL` / `ATTACKER_MODEL` / `JUDGE_MODEL`) default to
 the active backend's model, so switching backends needs no other changes.
 
-> ⚠️ **Tool-use reliability on the local backend.** `qwen3:8b` supports
+> ⚠️ **Tool-use reliability on the local backend.** `qwen3:4b` supports
 > **native** function/tool calling via Ollama's `/api/chat` (verified before
 > shipping), so the target agent makes real structured tool calls — no
-> prompt-scraping fallback. But an 8B local model is **materially less reliable**
+> prompt-scraping fallback. But a 4B local model is **materially less reliable**
 > than a hosted frontier model: it follows tool schemas and multi-step
 > instructions less consistently, is slower (it's a reasoning model with a
 > separate `thinking` stream), and has **no `refusal` stop reason** (Ollama
@@ -153,8 +153,8 @@ Install [Ollama](https://ollama.com), then pull the default model and confirm
 it's serving:
 
 ```bash
-ollama pull qwen3:8b
-curl http://localhost:11434/api/tags   # should list qwen3:8b
+ollama pull qwen3:4b
+curl http://localhost:11434/api/tags   # should list qwen3:4b
 ```
 
 (Skip this if you set `LLM_BACKEND=anthropic` — then set `ANTHROPIC_API_KEY` instead.)
@@ -348,7 +348,7 @@ and all judging paths are tested with synthetic runs — no daemon, no API key.
 - Python 3.11+
 - **One model backend:**
   - **Ollama** (default) — [install Ollama](https://ollama.com) and
-    `ollama pull qwen3:8b`. No API key. No extra Python dependency (the client
+    `ollama pull qwen3:4b`. No API key. No extra Python dependency (the client
     uses stdlib `urllib`).
   - **Anthropic** (optional) — an `ANTHROPIC_API_KEY`, and `LLM_BACKEND=anthropic`.
 - Docker + Docker Compose — for real, sandboxed runs (optional for development).
