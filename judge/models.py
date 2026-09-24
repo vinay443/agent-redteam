@@ -46,12 +46,26 @@ class Verdict:
     blocked_by_code: bool
     """True = a code-level boundary stopped the attack (vs the model declining)."""
 
-    method: str  # "code" | "llm" | "code+llm" | "errored" (run never executed)
+    method: str
+    """How the verdict was reached.
+
+    ``"code"`` | ``"llm"`` | ``"code+llm"`` for a scored attack, plus two
+    not-scored outcomes the report must keep out of the success-rate
+    denominator: ``"errored"`` (the run never executed) and ``"judge_errored"``
+    (the run executed but the LLM judge failed to return a verdict).
+    """
+
     confidence: float = 1.0
     rationale: str = ""
     signals: Signals = field(default_factory=Signals)
     llm_used: bool = False
+
     llm_error: str | None = None
+    """Why no LLM verdict was obtained: the judge's error, or ``"judge_disabled"``.
+
+    Persisted in its own column, not only inside ``verdict_json``, because the
+    report has to be able to count these without parsing every blob.
+    """
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

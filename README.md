@@ -290,10 +290,22 @@ Both `results/` and `sandbox/runs/` are git-ignored.
 ## Reproducibility
 
 Each run records the LLM backend, the target/attacker/judge model ids, the
-guard, the egress allowlist, and a **SHA-256 fingerprint of the exact system
-prompt** it ran against — so a whole campaign is provably one backend and one
-prompt version, and changing either shows up in the results instead of silently
-shifting the numbers.
+guard, the egress allowlist, and a **SHA-256 fingerprint of the system-prompt
+template** — so a whole campaign is provably one backend and one prompt version,
+and changing either shows up in the results instead of silently shifting the
+numbers.
+
+The fingerprint covers the template's wording with its two per-run fields
+normalised to placeholders. Both genuinely vary *inside* one campaign — the
+sandbox root is a per-attack directory and the canary is regenerated per run —
+so no single rendered prompt can stand for the campaign. Normalising them is
+what makes the hash comparable: identical across every attack in a campaign and
+across campaigns that ran the same template, and different as soon as the
+wording changes.
+
+The exact hash of what each attack's model actually received — sandbox root and
+canary included — is recorded separately on that attack's run record, as
+`system_prompt_sha256`.
 
 Attacker variants are non-deterministic (they come from a model), but every
 generated variant records its `parent_id`, so any result traces back to the

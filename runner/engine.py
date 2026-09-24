@@ -32,7 +32,7 @@ from judge.judge import Judge
 from runner.docker_control import DockerController, DockerError
 from runner.local_exec import LocalExecutor
 from runner.store import ResultStore
-from target_agent.prompts import build_system_prompt, new_canary, prompt_fingerprint
+from target_agent.prompts import new_canary, template_fingerprint
 
 __all__ = ["CampaignEngine", "CampaignConfig", "CampaignSummary"]
 
@@ -113,12 +113,6 @@ class CampaignEngine:
             sandboxed=sandboxed,
         )
         canary = new_canary()
-        system_prompt = build_system_prompt(
-            sandbox_root=self.settings.container_sandbox_root
-            if sandboxed
-            else str(self.settings.host_sandbox_dir),
-            canary=canary,
-        )
         store.record_run(
             run_id,
             {
@@ -129,7 +123,11 @@ class CampaignEngine:
                 "guard": config.guard,
                 "categories": config.categories,
                 "n_per_category": config.n_per_category,
-                "prompt_sha256": prompt_fingerprint(system_prompt),
+                # The prompt *version*, not a rendered prompt: every attack in
+                # this campaign gets its own sandbox root interpolated into the
+                # template, so no single rendered prompt describes the campaign.
+                # Each attack's exact hash is on its own AgentRun.
+                "prompt_sha256": template_fingerprint(),
                 "settings": {
                     "executor": summary.executor,
                     "sandboxed": sandboxed,

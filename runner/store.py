@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS attacks (
     agent_refused     INTEGER,
     agent_error       TEXT,
     llm_used          INTEGER,
+    llm_error         TEXT,
     duration_ms       REAL,
     created_at        TEXT NOT NULL,
     attack_json       TEXT NOT NULL,
@@ -76,6 +77,13 @@ CREATE INDEX IF NOT EXISTS idx_attacks_run ON attacks(run_id);
 CREATE INDEX IF NOT EXISTS idx_attacks_cat ON attacks(category);
 CREATE INDEX IF NOT EXISTS idx_attacks_success ON attacks(success);
 """
+
+# Columns added to ``attacks`` after the table first shipped. There is one
+# long-lived database per lab, not one per run, so ``CREATE TABLE IF NOT
+# EXISTS`` never reaches a database that already exists: without this, the
+# first INSERT against an older file would fail on an unknown column. Each
+# entry is (column name, the ADD COLUMN body). Order is append-only.
+_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (("llm_error", "llm_error TEXT"),)
 
 
 @dataclass
@@ -99,6 +107,7 @@ class AttackResult:
     canary_in_files: bool
     agent_refused: bool
     agent_error: str | None
+    llm_error: str | None
     duration_ms: float
     attack: dict[str, Any]
     run: dict[str, Any]
@@ -114,7 +123,17 @@ class ResultStore:
         self._conn = sqlite3.connect(str(self.db_path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Bring an already-existing database up to the current schema."""
+        existing = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(attacks)")
+        }
+        for column, ddl in _ADDED_COLUMNS:
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE attacks ADD COLUMN {ddl}")
 
     # -- writing ------------------------------------------------------------
 
@@ -171,11 +190,16 @@ class ResultStore:
                 judge_method, success, blocked_by_code, confidence, rationale,
                 escaped_calls, blocked_tool_calls, outside_root_attempts, tool_calls,
                 canary_in_output, canary_in_files, agent_refused, agent_error,
-                llm_used, duration_ms, created_at, attack_json, run_json, verdict_json
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                llm_used, llm_error, duration_ms, created_at,
+                attack_json, run_json, verdict_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(run_id, attack_id) DO UPDATE SET
                 success=excluded.success,
                 blocked_by_code=excluded.blocked_by_code,
+                -- re-judging an attack can change how it was scored, and both
+                -- of these decide which bucket the report counts it in.
+                judge_method=excluded.judge_method,
+                llm_error=excluded.llm_error,
                 verdict_json=excluded.verdict_json,
                 run_json=excluded.run_json
             """,
@@ -201,6 +225,7 @@ class ResultStore:
                 1 if signals.get("agent_refused") else 0,
                 signals.get("agent_error"),
                 1 if verdict.get("llm_used") else 0,
+                verdict.get("llm_error"),
                 float(run.get("duration_ms", 0.0)),
                 utcnow_iso(),
                 json.dumps(attack, ensure_ascii=False, default=str),
@@ -228,6 +253,7 @@ class ResultStore:
             "success": verdict.get("success"),
             "blocked_by_code": verdict.get("blocked_by_code"),
             "method": verdict.get("method"),
+            "llm_error": verdict.get("llm_error"),
             "rationale": verdict.get("rationale"),
             "signals": verdict.get("signals"),
             "attack": attack,
@@ -262,6 +288,7 @@ class ResultStore:
             "SELECT * FROM attacks WHERE run_id = ? ORDER BY id", (run_id,)
         ).fetchall()
         for row in rows:
+            verdict = json.loads(row["verdict_json"])
             yield AttackResult(
                 run_id=row["run_id"],
                 attack_id=row["attack_id"],
@@ -280,10 +307,15 @@ class ResultStore:
                 canary_in_files=bool(row["canary_in_files"]),
                 agent_refused=bool(row["agent_refused"]),
                 agent_error=row["agent_error"],
+                # Rows written before the column existed have NULL here but
+                # already carry the string inside verdict_json — Verdict has
+                # always serialised it — so old runs still re-report their
+                # judge errors instead of looking like clean defences.
+                llm_error=row["llm_error"] or verdict.get("llm_error") or None,
                 duration_ms=row["duration_ms"],
                 attack=json.loads(row["attack_json"]),
                 run=json.loads(row["run_json"]),
-                verdict=json.loads(row["verdict_json"]),
+                verdict=verdict,
             )
 
     def results(self, run_id: str) -> list[AttackResult]:
